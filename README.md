@@ -12,8 +12,9 @@
 - 中文就绪：AC 自动机词典匹配（70 万词 µs 级）、词林/反义词库/高频蒸馏词库 68 万词条；
 - 基准可评：LoCoMo / LongMemEval / BEAM 离线评测管线 + DeepSeek LLM 管线（可插拔）。
 
-设计文档：`docs/联想记忆引擎/联想记忆引擎设计文档.md`（设计冻结版）、
-`联想记忆引擎_工程实现与优化文档.md`（实现与迭代记录）。
+设计文档：[docs/design/联想记忆引擎设计文档.md](docs/design/联想记忆引擎设计文档.md)（设计冻结版，含架构图）、
+[docs/engineering/联想记忆引擎_工程实现与优化文档.md](docs/engineering/联想记忆引擎_工程实现与优化文档.md)（实现与迭代记录）。
+文档索引见 [docs/README.md](docs/README.md)。
 
 ---
 
@@ -127,8 +128,11 @@ magic+版本+词典 (size,mtime) 校验，不一致自动重建。
 
 **证据打包（NEXT±1）与两阶段聚合作答**。top-k 证据事件带同 session 前后各一轮上下文，
 缓解片段信息不足（judge +16pp 实测）。聚合类问题（how many/total/所有）可走两阶段：
-逐项提取（每条证据独立确认事实或 NONE）→ 事实列表聚合作答（`--answer-mode
-aggregate`，默认关——小样本 1/5 vs 0/5，瓶颈在提取召回，见"已否证的假设"旁注）。
+k_pool 候选池（~50 条）→ 本地预过滤（池内 BM25-lite，零 LLM，`--agg-prefilter-n`
+默认 20）→ 批量提取（`--agg-batch` 默认 5 条/次，编号 [E#] 输入、逐条输出事实/NONE，
+保留思考）→ 事实列表聚合作答（`--answer-mode aggregate`，默认关）。LME 14 道聚合题
+实测 judge 3/14 vs 逐条基线 0/14（3 题 0→1、零退化），answer 侧调用 4.8 次/题 vs
+逐条 16.2 次/题（约 1/3.4）；瓶颈仍在提取召回（平均 3.2 条事实/题），未达转正线。
 
 ---
 
@@ -162,7 +166,9 @@ NEXT±1 + think + k_pool）**：
 - **条件归一**：查询词无直接命中才词典扩展——sample50 上 0.521/0.380 不优于
   全局扩展+蒸馏词典（0.542/0.440），WordNet 在门控下零新增命中。保持默认关。
 - **WordNet/gap 大词典默认灌库**：宽泛同义归一稀释精度（judge -6pp），保留文件待用。
-- **两阶段聚合作答**：1/5 vs 0/5 微正但未达转正线（阶段一提取召回不足），默认关。
+- **两阶段聚合作答**：逐条版 1/5 vs 0/5 微正；预过滤(N=20)+批量(5条/次)降本组合
+  3/14 vs 0/14（3 题 0→1、零退化，answer 侧调用降至 ~1/3.4，缓存重放第二遍 0 新调用），
+  仍未达转正线（阶段一提取召回不足，平均仅 3.2 条事实/题），默认关。
 
 ---
 
@@ -201,6 +207,7 @@ cd build && ctest --output-on-failure # 18/18 全绿（16 模块单测 + e2e + b
 #   --save-graph P / --load-graph P（摄入快照，零提取重放）
 #   --question-ids ids.json（固定样本）--feedback-dir P（M11/M14 闭环）
 #   --entity-profile on|off --conditional-normalize on|off --answer-mode aggregate
+#   --agg-prefilter-n 20（聚合预过滤保留条数）--agg-batch 5（批量提取每次条数）
 ```
 
 **DeepSeek 配置**（只此两种方式，key 不入库不入日志）：
@@ -210,7 +217,7 @@ cd build && ctest --output-on-failure # 18/18 全绿（16 模块单测 + e2e + b
 - 模型：`deepseek-v4-flash`（批量）/ `deepseek-v4-pro`；推理模型 max_tokens 含思考预算，
   提取类任务默认关思考（`thinking:{type:disabled}`），答题保留思考。
 
-**词库工具**：见 `lexicon/README.md`（资产总表/schema/许可/加载/蒸馏复跑命令）。
+**词库工具**：见 [lexicon/README.md](lexicon/README.md)（资产总表/schema/许可/加载/蒸馏复跑命令）。
 
 ---
 
@@ -224,7 +231,7 @@ llm/          # DeepSeek 接入（客户端/提取器/答题器/评审器/词典
 lexicon/      # 词库资产（68万+ 词条，含 README 与 lexicon_src 整理中间层）
 tests/        # 18 个测试可执行（模块单测 + e2e + bench + llm，ctest 注册）
 demo/         # 中文演示程序
-docs/         # 设计文档（上级目录 docs/联想记忆引擎/）
+docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实现与优化文档）
 ```
 
 ### 答题链路的模块联动（QA pipeline 全模块角色表）
