@@ -1,0 +1,10 @@
+# 构建产物
+build/
+.DS_Store
+# 运行产物与私有配置（API key 绝不入库）
+bench/runs/
+bench/cache/
+bench/config/*.local.json
+# 基准原始数据（体积大/版权，README 写明获取方式；fixtures 与蒸馏产物保留）
+bench/data/longmemeval_s_cleaned.json
+bench/data/locomo10.json

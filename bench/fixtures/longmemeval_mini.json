@@ -1,0 +1,58 @@
+[
+  {
+    "question_id": "lme-mini-1",
+    "question_type": "multi-session",
+    "question": "Where does Alice work from now?",
+    "answer": "She works remotely from Portland",
+    "question_date": "2023-09-01",
+    "haystack_session_ids": ["s1", "s2"],
+    "haystack_dates": ["2023-01-10", "2023-08-20"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I moved to Seattle for my new job at Contoso."},
+        {"role": "assistant", "content": "Great news, congrats on the new job!"}
+      ],
+      [
+        {"role": "user", "content": "I moved again, now I live in Portland and work remotely."},
+        {"role": "assistant", "content": "Portland is a nice change."}
+      ]
+    ],
+    "answer_session_ids": ["s2"]
+  },
+  {
+    "question_id": "lme-mini-2",
+    "question_type": "temporal-reasoning",
+    "question": "Had Alice already moved to Portland a few months ago?",
+    "answer": "Yes, she moved to Portland in August 2023",
+    "question_date": "2023-11-05",
+    "haystack_session_ids": ["s1", "s2"],
+    "haystack_dates": ["2023-01-10", "2023-08-20"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I moved to Seattle for my new job at Contoso."},
+        {"role": "assistant", "content": "Great news, congrats on the new job!"}
+      ],
+      [
+        {"role": "user", "content": "I moved again, now I live in Portland and work remotely."},
+        {"role": "assistant", "content": "Portland is a nice change."}
+      ]
+    ],
+    "answer_session_ids": ["s2"]
+  },
+  {
+    "question_id": "lme-mini-3",
+    "question_type": "abstention",
+    "question": "What is Alice's favorite restaurant?",
+    "answer": "The information is not available in the conversation",
+    "question_date": "2023-09-01",
+    "haystack_session_ids": ["s1"],
+    "haystack_dates": ["2023-01-10"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I moved to Seattle for my new job at Contoso."},
+        {"role": "assistant", "content": "Great news, congrats on the new job!"}
+      ]
+    ],
+    "answer_session_ids": []
+  }
+]

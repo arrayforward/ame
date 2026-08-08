@@ -1,0 +1,32 @@
+[
+  {
+    "sample_id": "locomo-mini-1",
+    "conversation": {
+      "session_1": [
+        {"speaker": "Alice", "dia_id": "D1:1", "text": "I moved to Seattle last week for my new job at Contoso."},
+        {"speaker": "Bob", "dia_id": "D1:2", "text": "Congrats! How do you like the city so far?"},
+        {"speaker": "Alice", "dia_id": "D1:3", "text": "I love the rain here, and I adopted a cat named Mochi."}
+      ],
+      "session_1_date_time": "2023-01-10 15:00",
+      "session_2": [
+        {"speaker": "Alice", "dia_id": "D2:1", "text": "I started training for the Seattle marathon every morning."},
+        {"speaker": "Bob", "dia_id": "D2:2", "text": "Nice. I finally finished reading that novel you gave me."},
+        {"speaker": "Alice", "dia_id": "D2:3", "text": "Mochi broke my favorite mug yesterday, I was so upset."}
+      ],
+      "session_2_date_time": "2023-03-15 18:30",
+      "session_3": [
+        {"speaker": "Alice", "dia_id": "D3:1", "text": "I moved again, now I live in Portland and work remotely."},
+        {"speaker": "Bob", "dia_id": "D3:2", "text": "So no more Seattle marathon training?"},
+        {"speaker": "Alice", "dia_id": "D3:3", "text": "Right, these days I go swimming instead of running."}
+      ],
+      "session_3_date_time": "2023-08-20 10:00"
+    },
+    "qa": [
+      {"question": "What is the name of Alice's cat?", "answer": "Mochi", "category": 1, "evidence": ["D1:3"]},
+      {"question": "Where did Alice live before moving to Portland?", "answer": "Seattle", "category": 2, "evidence": ["D1:1", "D3:1"]},
+      {"question": "Did Alice adopt her cat before or after she started marathon training?", "answer": "Before", "category": 3, "evidence": ["D1:3", "D2:1"]},
+      {"question": "What does Alice probably enjoy doing?", "answer": "She enjoys running swimming and her cat", "category": 4, "evidence": ["D2:1", "D3:3"]},
+      {"question": "What kind of car does Alice drive?", "answer": "No information available", "category": 5, "evidence": []}
+    ]
+  }
+]

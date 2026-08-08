@@ -1,0 +1,3 @@
+add_library(ame_graph_writer STATIC src/graph_writer.cpp)
+target_include_directories(ame_graph_writer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(ame_graph_writer PUBLIC ame_core ame_storage ame_keyword ame_time ame_vector ame_extractor)

@@ -1,0 +1,260 @@
+/*
+ * bench 基准适配层测试：夹具加载（三格式）、摄入后图规模、
+ * 指标已知答案断言（token F1 / nugget 代理分 / Kendall tau-b）、
+ * 弃答门控、知识更新（SUPERSEDES + current/as_of）、事件排序 order_events。
+ */
+#include <algorithm>
+#include <filesystem>
+
+#include "ame/bench/bench.h"
+#include "ame/bench/metrics.h"
+#include "ame/engine/engine.h"
+#include "test_util.hpp"
+
+using namespace ame;
+
+static const char* kFixtureDir = AME_FIXTURE_DIR;  // CMake 注入
+
+static void test_load_fixtures() {
+  auto loco = load_locomo(std::string(kFixtureDir) + "/locomo_mini.json");
+  CHECK(loco.size() == 1);
+  CHECK(loco[0].sessions.size() == 3);
+  CHECK(loco[0].sessions[0].turns.size() == 3);
+  CHECK(loco[0].sessions[0].turns[0].dia_id == "D1:1");
+  CHECK(loco[0].questions.size() == 5);
+  CHECK(loco[0].questions[0].category == 1);  // 不透明整数原样保留
+  CHECK(loco[0].questions[1].evidence_dia_ids.size() == 2);
+
+  auto lme = load_longmemeval(std::string(kFixtureDir) + "/longmemeval_mini.json");
+  CHECK(lme.size() == 3);
+  CHECK(lme[0].sessions.size() == 2);
+  CHECK(lme[0].sessions[0].id == "s1");
+  CHECK(lme[0].questions[0].answer_session_ids.size() == 1);
+  CHECK(lme[2].questions[0].unanswerable);  // abstention 题
+
+  auto beam = load_beam(std::string(kFixtureDir) + "/beam_mini.json");
+  CHECK(beam.size() == 1);
+  CHECK(beam[0].sessions.size() == 2);
+  CHECK(beam[0].questions.size() == 4);
+  CHECK(beam[0].questions[0].nuggets.size() == 3);
+  CHECK(beam[0].questions[3].unanswerable);
+}
+
+static void test_ingest_graph() {
+  auto loco = load_locomo(std::string(kFixtureDir) + "/locomo_mini.json");
+  Engine e;
+  IngestStats st = ingest(e, loco[0]);
+  CHECK(st.events == 9);                    // 9 轮 → 9 事件
+  CHECK(st.entities >= 2);                  // Alice/Bob 至少两个实体
+  // 同一 speaker 跨轮复用同一 uid
+  const Node* alice = e.storage().find_by_name(NodeKind::Entity, "Alice");
+  CHECK(alice != nullptr);
+  int alice_events = 0;
+  for (auto& [ed, n] : e.storage().neighbors(alice->uid, {RelType::INVOLVES}))
+    if (n->kind == NodeKind::Event) ++alice_events;
+  CHECK(alice_events == 6);                 // Alice 说了 6 轮
+  // NEXT 链：9 事件 → 8 条 NEXT 边
+  int next_edges = 0;
+  for (auto* n : e.storage().nodes_of_kind(NodeKind::Event))
+    next_edges += (int)e.storage().neighbors(n->uid, {RelType::NEXT}).size();
+  CHECK(next_edges >= 8);
+  // dia_id 落属性
+  bool has_dia = false;
+  for (auto* n : e.storage().nodes_of_kind(NodeKind::Event))
+    if (n->attrs.count("dia_id") && n->attrs.at("dia_id") == "D2:3") has_dia = true;
+  CHECK(has_dia);
+}
+
+static void test_metrics_known_values() {
+  // token F1：pred {the,cat} gold {the,cat,sat} → 2*2/(2+3)=0.8
+  CHECK_NEAR(token_f1("the cat", "the cat sat"), 0.8, 1e-9);
+  CHECK_NEAR(token_f1("", "anything"), 0.0, 1e-9);
+  // CJK 单字成词
+  CHECK(tokenize("失眠").size() == 2);
+
+  // nugget 代理分：nugget1 全命中(F1=0.6→1)，nugget2 零命中(→0)，均值 0.5
+  double ns = nugget_proxy_score("booked a flight and reserved a hotel",
+                                 {"booked a flight", "bought insurance"});
+  CHECK_NEAR(ns, 0.5, 1e-9);
+
+  // Kendall tau-b：参考序 [flight, hotel, insurance]，回答中 hotel 先于 flight
+  double tau = order_tau_b("reserved a hotel then booked a flight and bought travel insurance",
+                           {"booked a flight", "reserved a hotel", "bought travel insurance"});
+  CHECK_NEAR(tau, 1.0 / 3.0, 1e-9);
+  // 完全正序 → 1
+  CHECK_NEAR(order_tau_b("booked a flight, reserved a hotel, bought travel insurance",
+                         {"booked a flight", "reserved a hotel", "bought travel insurance"}),
+             1.0, 1e-9);
+  // 完全逆序 → -1
+  CHECK_NEAR(order_tau_b("bought travel insurance, reserved a hotel, booked a flight",
+                         {"booked a flight", "reserved a hotel", "bought travel insurance"}),
+             -1.0, 1e-9);
+}
+
+static void test_abstention_gate() {
+  Engine e;
+  e.remember_turn("Alice", "I adopted a cat named Mochi.", 1700000000, "D1:1", "s1");
+  BenchConfig cfg;
+  cfg.abstain_threshold = 0.15;
+  // 相关提问：证据分高 → 不弃答
+  BenchQuestion q1;
+  q1.question = "I adopted a cat named Mochi.";  // 与事件完全同文 → 软种子 sim≈1
+  auto r1 = answer(e, q1, cfg);
+  CHECK(!r1.abstained);
+  CHECK(r1.score > cfg.abstain_threshold);
+  CHECK(!r1.evidence_dia_ids.empty());
+  CHECK(std::find(r1.evidence_dia_ids.begin(), r1.evidence_dia_ids.end(), "D1:1") !=
+        r1.evidence_dia_ids.end());
+  // 无关提问：相似度极低 → 证据分低于高门控阈值 → 弃答
+  BenchConfig cfg2;
+  cfg2.abstain_threshold = 0.9;
+  BenchQuestion q2;
+  q2.question = "zzqq xwvu";
+  auto r2 = answer(e, q2, cfg2);
+  CHECK(r2.abstained);
+  CHECK(r2.answer_text == "unanswerable");
+}
+
+static void test_knowledge_update() {
+  Engine e;
+  auto r1 = e.remember_turn("Alice", "I moved to Seattle for work.", 1700000000, "D1:1", "s1");
+  auto r2 = e.remember_turn("Alice", "I moved to Portland last month.", 1700000000 + 86400,
+                            "D2:1", "s2");
+  // 共享槽位词 "moved"(attr) + 同一实体 Alice → 旧事件被取代
+  const Node* old_ev = e.storage().get_node(r1.event_id);
+  CHECK(old_ev && old_ev->attrs.count("valid_to"));
+  CHECK(e.storage().find_edge(r2.event_id, r1.event_id, RelType::SUPERSEDES) != nullptr);
+
+  // 当前视角：只剩 Portland 事件
+  LookupQuery lq;
+  lq.keywords = {"moved"};
+  lq.current_only = true;
+  auto cur = e.lookup(lq);
+  CHECK(cur.size() == 1);
+  CHECK(cur[0]->uid == r2.event_id);
+
+  // as_of 历史视角：t1 之后 t2 之前 → Seattle 事件
+  auto hist = e.lookup_as_of(lq, 1700000000 + 3600);
+  CHECK(hist.size() == 1);
+  CHECK(hist[0]->uid == r1.event_id);
+}
+
+static void test_order_events() {
+  Engine e;
+  auto r1 = e.remember_turn("Alice", "First I booked a flight.", 1700000000, "", "s1");
+  auto r2 = e.remember_turn("Alice", "Then I reserved a hotel.", 1700000060, "", "s1");
+  auto r3 = e.remember_turn("Alice", "Finally I bought insurance.", 1700000120, "", "s1");
+  // 打乱输入顺序，输出应为时间升序
+  auto ordered = e.order_events({r3.event_id, r1.event_id, r2.event_id});
+  CHECK(ordered.size() == 3);
+  CHECK(ordered[0] == r1.event_id && ordered[1] == r2.event_id && ordered[2] == r3.event_id);
+}
+
+static void test_snapshot_with_slots() {
+  // 组合快照：图 + 实体档案槽位（含 valid_to 历史）往返一致
+  Engine e;
+  auto r1 = e.remember_turn("Alice", "I moved to Seattle for work.", 1700000000, "D1:1", "s1");
+  auto r2 = e.remember_turn("Alice", "I moved to Portland last month.", 1700000000 + 86400,
+                            "D2:1", "s2");
+  std::string alice = r1.resolved_entities[0].second;
+  e.entities().put_slot(alice, "residence", "Seattle", 1700000000, r1.event_id);
+  e.entities().put_slot(alice, "residence", "Portland", 1700000000 + 86400, r2.event_id);
+
+  std::string path = "/tmp/ame_test_combined_snapshot.json";
+  CHECK(e.save(path) == Err::Ok);
+  Engine e2;
+  CHECK(e2.load(path) == Err::Ok);
+  CHECK(e2.storage().node_count() == e.storage().node_count());
+  CHECK(e2.storage().edge_count() == e.storage().edge_count());
+  auto p = e2.get_entity_profile(alice);
+  CHECK(p.current_slot("residence") == "Portland");
+  CHECK(p.slots.size() == 2);  // 历史值 Seattle 保留
+  CHECK(e2.entities().slot_as_of(alice, "residence", 1700000000 + 3600) == "Seattle");
+  // recall 一致性
+  SeedQuery sq;
+  sq.text = "moved";
+  auto a = e.recall(sq, {}, 2, 10, false);
+  e2.reranker().set_weights(e.reranker().weights());
+  auto b = e2.recall(sq, {}, 2, 10, false);
+  CHECK(a.events.size() == b.events.size());
+  for (size_t i = 0; i < a.events.size(); ++i)
+    CHECK(a.events[i].event->uid == b.events[i].event->uid);
+}
+
+// 中文词林灌库验证：同义归一命中 + 对立边抑制 + 幂等（转换产物 lexicon_zh.json）
+static void test_chinese_lexicon() {
+  std::string lex = std::string(AME_FIXTURE_DIR) + "/../data/lexicon_zh.json";
+  if (!std::filesystem::exists(lex)) {
+    std::printf("SKIP test_chinese_lexicon: %s 不存在\n", lex.c_str());
+    return;
+  }
+  Engine e;
+  auto r1 = e.remember("我昨晚又睡不着了");
+  auto r2 = e.remember("老张今天很愉快");
+  auto r3 = e.remember("老王昨天很悲伤");
+  CHECK(r1.code == Err::Ok && r2.code == Err::Ok && r3.code == Err::Ok);
+
+  int applied = 0;
+  CHECK(apply_lexicon(e, lex, &applied) == Err::Ok);
+  CHECK(applied > 0);
+  // 词林同义归一：愉快 → 开心（同义组首词方向之一；以实际灌库结果为准的双向验证）
+  CHECK(e.keywords().normalize("愉快") == "开心" ||
+        e.keywords().normalize("开心") == "愉快" ||
+        e.keywords().normalize("高兴") == "开心" ||
+        e.keywords().normalize("愉快") == "高兴");
+  // 内置归一不受大词典影响：睡不着 → 失眠
+  CHECK(e.keywords().normalize("睡不着") == "失眠");
+  // 查询 "失眠" 命中 "睡不着" 事件
+  SeedQuery sq;
+  sq.text = "失眠";
+  auto rr = e.recall(sq, {}, 2, 10, false);
+  bool hit_insomnia = false;
+  for (auto& se : rr.events)
+    if (se.event->uid == r1.event_id) hit_insomnia = true;
+  CHECK(hit_insomnia);
+  // 对立抑制：查询 "开心"，愉快事件应排在悲伤事件之前（对立边系数最低）
+  SeedQuery sq2;
+  sq2.text = "开心";
+  auto rr2 = e.recall(sq2, {}, 2, 10, false);
+  int pos_happy = -1, pos_sad = -1;
+  for (size_t i = 0; i < rr2.events.size(); ++i) {
+    if (rr2.events[i].event->uid == r2.event_id) pos_happy = (int)i;
+    if (rr2.events[i].event->uid == r3.event_id) pos_sad = (int)i;
+  }
+  CHECK(pos_happy >= 0);
+  if (pos_sad >= 0) CHECK(pos_happy < pos_sad);
+  // 灌库幂等：重复 apply 边数不变
+  size_t edges1 = e.storage().edge_count();
+  CHECK(apply_lexicon(e, lex, nullptr) == Err::Ok);
+  CHECK(e.storage().edge_count() == edges1);
+  // 多文件拼接：lexicon_zh2（箭头对同义词典）并集 + 幂等
+  std::string lex2 = std::string(AME_FIXTURE_DIR) + "/../data/lexicon_zh2.json";
+  if (std::filesystem::exists(lex2)) {
+    CHECK(apply_lexicon(e, lex2, nullptr) == Err::Ok);
+    CHECK(e.keywords().normalize("百度") == "baidu");  // 箭头对 baidu→百度 反向归一
+    size_t edges2 = e.storage().edge_count();
+    CHECK(apply_lexicon(e, lex2, nullptr) == Err::Ok);
+    CHECK(e.storage().edge_count() == edges2);
+  }
+  // 三本拼接：+ lexicon_hf（高频蒸馏），幂等 + 内置保护仍生效
+  std::string lex3 = std::string(AME_FIXTURE_DIR) + "/../data/lexicon_hf.json";
+  if (std::filesystem::exists(lex3)) {
+    CHECK(apply_lexicon(e, lex3, nullptr) == Err::Ok);
+    size_t edges3 = e.storage().edge_count();
+    CHECK(apply_lexicon(e, lex3, nullptr) == Err::Ok);  // 幂等
+    CHECK(e.storage().edge_count() == edges3);
+    CHECK(e.keywords().normalize("睡不着") == "失眠");  // 内置标准词不被改写
+  }
+}
+
+int main() {
+  test_load_fixtures();
+  test_ingest_graph();
+  test_metrics_known_values();
+  test_abstention_gate();
+  test_knowledge_update();
+  test_order_events();
+  test_snapshot_with_slots();
+  test_chinese_lexicon();
+  return AME_TEST_REPORT();
+}

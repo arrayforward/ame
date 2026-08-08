@@ -1,0 +1,55 @@
+[
+  {
+    "conversation_id": "beam-mini-1",
+    "sessions": [
+      {
+        "id": "bs1",
+        "date": "2023-02-01",
+        "turns": [
+          {"role": "user", "content": "First I booked a flight to Tokyo for next month."},
+          {"role": "user", "content": "Then I reserved a hotel near Shinjuku station."},
+          {"role": "assistant", "content": "Sounds like a solid plan."},
+          {"role": "user", "content": "Finally I bought travel insurance for the trip."}
+        ]
+      },
+      {
+        "id": "bs2",
+        "date": "2023-02-15",
+        "turns": [
+          {"role": "user", "content": "Update: I cancelled the hotel near Shinjuku and booked a ryokan in Kyoto instead."},
+          {"role": "assistant", "content": "Kyoto is beautiful in spring."}
+        ]
+      }
+    ],
+    "questions": [
+      {
+        "id": "b1",
+        "ability": "event_ordering",
+        "question": "List my trip preparations in chronological order.",
+        "answer": "booked a flight, reserved a hotel, bought travel insurance",
+        "nuggets": ["booked a flight", "reserved a hotel", "bought travel insurance"]
+      },
+      {
+        "id": "b2",
+        "ability": "information_extraction",
+        "question": "Where was my original hotel?",
+        "answer": "Near Shinjuku station",
+        "nuggets": ["near Shinjuku station"]
+      },
+      {
+        "id": "b3",
+        "ability": "knowledge_update",
+        "question": "Where am I staying in Japan now?",
+        "answer": "A ryokan in Kyoto",
+        "nuggets": ["ryokan in Kyoto"]
+      },
+      {
+        "id": "b4",
+        "ability": "abstention",
+        "question": "How much did the flight cost?",
+        "answer": "Not mentioned in the conversation",
+        "nuggets": []
+      }
+    ]
+  }
+]

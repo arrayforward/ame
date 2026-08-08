@@ -1,0 +1,191 @@
+[
+ {
+  "src": "THUOCL_animal",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 17287,
+  "parsed": 17287,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_caijing",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 3830,
+  "parsed": 3830,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_chengyu",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 8519,
+  "parsed": 8519,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_diming",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 44804,
+  "parsed": 44804,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_food",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 8974,
+  "parsed": 8974,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_law",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 9896,
+  "parsed": 9896,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_lishimingren",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 13658,
+  "parsed": 13658,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_medical",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 18749,
+  "parsed": 18749,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "THUOCL_poem",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 13703,
+  "parsed": 13703,
+  "failed": 0,
+  "note": "词\\t频次，部分行无频次按 0"
+ },
+ {
+  "src": "IT/THUOCL_it.txt",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 16000,
+  "parsed": 15799,
+  "failed": 4,
+  "note": "目录名无 THUOCL_ 前缀"
+ },
+ {
+  "src": "professions/professions.txt",
+  "category": "domain",
+  "encoding": "utf-8-sig",
+  "lines": 7569,
+  "parsed": 7568,
+  "failed": 0,
+  "note": "一行一词"
+ },
+ {
+  "src": "input/同义词.txt",
+  "category": "synonyms",
+  "encoding": "gbk-replace",
+  "lines": 42536,
+  "parsed": 42522,
+  "failed": 14,
+  "note": "箭头对 word→syn（word 为标准词）；词林格式保留；其余按空白/逗号分组"
+ },
+ {
+  "src": "input/30wdict_utf8.txt",
+  "category": "segmentation",
+  "encoding": "utf-8-sig",
+  "lines": 291269,
+  "parsed": 291269,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/30wChinsesSeqDic_clean.txt",
+  "category": "segmentation",
+  "encoding": "gbk",
+  "lines": 298032,
+  "parsed": 298032,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/dict.txt",
+  "category": "segmentation",
+  "encoding": "utf-8-sig",
+  "lines": 217413,
+  "parsed": 217413,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/httpcws_dict.txt",
+  "category": "segmentation",
+  "encoding": "gbk-replace",
+  "lines": 196345,
+  "parsed": 196345,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/词.txt",
+  "category": "segmentation",
+  "encoding": "gbk",
+  "lines": 133819,
+  "parsed": 133819,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/输入法.txt",
+  "category": "segmentation",
+  "encoding": "gbk",
+  "lines": 107908,
+  "parsed": 100776,
+  "failed": 7132,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/输入2.TXT",
+  "category": "segmentation",
+  "encoding": "gbk",
+  "lines": 43470,
+  "parsed": 43470,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/out.txt",
+  "category": "segmentation",
+  "encoding": "gbk-replace",
+  "lines": 155073,
+  "parsed": 155073,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ },
+ {
+  "src": "input/fingerDic.txt",
+  "category": "segmentation",
+  "encoding": "utf-8-sig",
+  "lines": 57478,
+  "parsed": 57478,
+  "failed": 0,
+  "note": "词性前缀剥离/频次可选，跨文件合并"
+ }
+]
