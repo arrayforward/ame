@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <sstream>
 
 namespace ame {
 
@@ -247,6 +248,49 @@ ChatRequest LlmAnswerer::build_extract_request(const std::string& question,
   o.max_tokens = 512;
   o.disable_thinking = false;  // 实测关思考会过度答 NONE（与答题器同因），保留思考
   return {{{"system", "你是事实提取器，只输出事实或 NONE。"}, {"user", user}}, o};
+}
+
+// build_extract_batch_request 伪代码（阶段一·批量提取，降本核心）：
+//   n 条编号证据一次喂入，要求逐条输出 "[E#]: 事实" 或 "[E#]: NONE"；保留思考
+//   （提取需要关联推理，实测关思考会过度 NONE）。
+ChatRequest LlmAnswerer::build_extract_batch_request(
+    const std::string& question, const std::vector<std::string>& evidence_texts) {
+  std::string user = "问题: " + question + "\n编号证据片段:\n";
+  for (size_t i = 0; i < evidence_texts.size(); ++i)
+    user += "[E" + std::to_string(i + 1) + "] " + evidence_texts[i] + "\n";
+  user += "逐条判断：该证据中与问题相关的事实是什么？每条输出一行 "
+          "\"[E编号]: 事实（一句话内）\"；无关则输出 \"[E编号]: NONE\"。"
+          "不要遗漏编号，不要输出其他内容。";
+  ChatOptions o;
+  o.max_tokens = 1024;
+  o.disable_thinking = false;  // 保留思考（关思考会过度 NONE）
+  return {{{"system", "你是事实提取器，逐条输出事实或 NONE。"}, {"user", user}}, o};
+}
+
+// parse_extract_batch 伪代码：逐行匹配 "[E数字]:" 前缀，编号在 [1,n] 且内容非 NONE
+//   非空则收录；编号越界/缺失/重复宽容跳过（重复编号取首次）。
+std::vector<std::pair<int, std::string>> LlmAnswerer::parse_extract_batch(
+    const std::string& resp, int n_evidence) {
+  std::vector<std::pair<int, std::string>> out;
+  std::vector<bool> seen(n_evidence, false);
+  std::istringstream ss(resp);
+  std::string line;
+  while (std::getline(ss, line)) {
+    size_t lb = line.find("[E");
+    if (lb == std::string::npos) continue;
+    size_t rb = line.find("]:", lb);
+    if (rb == std::string::npos) continue;
+    int idx = std::atoi(line.substr(lb + 2, rb - lb - 2).c_str());
+    if (idx < 1 || idx > n_evidence || seen[idx - 1]) continue;
+    std::string fact = line.substr(rb + 2);
+    while (!fact.empty() && (fact.back() == ' ' || fact.back() == '\r')) fact.pop_back();
+    size_t ws = fact.find_first_not_of(' ');
+    if (ws != std::string::npos) fact = fact.substr(ws);
+    if (fact.empty() || is_none(fact)) continue;
+    seen[idx - 1] = true;
+    out.emplace_back(idx - 1, fact);
+  }
+  return out;
 }
 
 // is_none 伪代码：前缀 NONE 或空 → 无关。

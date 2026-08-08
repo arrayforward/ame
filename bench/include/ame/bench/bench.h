@@ -67,6 +67,8 @@ struct BenchConfig {
   int beam_width = 0;                  // 束搜索宽度（0=BFS；--beam N 启用引导式扩散阶段 1）
   std::string think_mode = "energy";   // energy（M8 能量扩散）| ircot（LLM 引导迭代检索）
   std::string answer_mode_agg = "";    // "aggregate" 时聚合类问题走两阶段（逐项提取+聚合）
+  int agg_prefilter_n = 20;            // 聚合题本地预过滤保留名额（BM25-lite 排序截断）
+  int agg_batch = 5;                   // 批量提取：每次喂入的证据条数
 
   // ---- LLM 管线配置（任务二）----
   std::string extractor_mode = "rule";    // rule|llm（llm 按会话批量提取）

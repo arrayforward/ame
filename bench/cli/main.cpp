@@ -83,6 +83,8 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--beam") cli.cfg.beam_width = std::atoi(next().c_str());
     else if (a == "--think-mode") cli.cfg.think_mode = next();
     else if (a == "--answer-mode") cli.cfg.answer_mode_agg = next();
+    else if (a == "--agg-prefilter-n") cli.cfg.agg_prefilter_n = std::atoi(next().c_str());
+    else if (a == "--agg-batch") cli.cfg.agg_batch = std::atoi(next().c_str());
     else if (a == "--save-graph") cli.save_graph = next();
     else if (a == "--load-graph") cli.load_graph = next();
     else if (a == "--feedback-dir") cli.feedback_dir = next();
@@ -219,6 +221,12 @@ int main(int argc, char** argv) {
   };
   std::vector<Pending> pendings;
   std::vector<std::unique_ptr<Engine>> engines;  // 保活到判分阶段（反馈回流用）
+  // 聚合题候选证据（case 循环内召回，引擎存活期收集）
+  struct AggJob {
+    int qi;
+    std::vector<std::string> evs;
+  };
+  std::vector<AggJob> agg_jobs;
 
   for (auto& c : cases) {
     // 跨 case 隔离；--feedback-dir 启用 M11/M14（每 case 独立目录）。
@@ -320,6 +328,32 @@ int main(int argc, char** argv) {
       p.group = q.qtype;
       p.eng_idx = engines.size() - 1;
       p.base = answer(e, q, cli.cfg);  // 离线取证（baseline 答案也由此产出）
+      // 聚合题：引擎存活期内召回候选并本地预过滤（BM25-lite 排序截断，零 LLM）
+      if (cli.cfg.answer_mode_agg == "aggregate" &&
+          LlmAnswerer::is_aggregate_question(q.question)) {
+        SeedQuery sq;
+        sq.text = q.question;
+        sq.soft_min_sim = cli.cfg.soft_min_sim;
+        sq.lex_topk = cli.cfg.k_pool / 2;
+        auto cands = e.recall(sq, {}, 2, cli.cfg.k_pool, false);
+        int total = (int)cands.events.size();
+        int kept = std::min(cli.cfg.agg_prefilter_n, total);
+        AggJob job{(int)(pendings.size()), {}};
+        for (int j = 0; j < kept; ++j) {
+          const Node* n = cands.events[j].event;
+          char dbuf[24] = "";
+          std::time_t t = (std::time_t)n->ts;
+          std::tm tm{};
+          gmtime_r(&t, &tm);
+          std::snprintf(dbuf, sizeof(dbuf), "[%04d-%02d-%02d] ", tm.tm_year + 1900,
+                        tm.tm_mon + 1, tm.tm_mday);
+          job.evs.push_back(dbuf + n->text);
+        }
+        if (total > kept)
+          std::fprintf(stderr, "  [prefilter] %s: 候选 %d → 保留 %d（砍 %d）\n",
+                       q.id.c_str(), total, kept, total - kept);
+        if (kept > 0) agg_jobs.push_back(std::move(job));
+      }
       // IRCoT 模式：LLM 引导迭代检索补证据（多轮子查询，去重并入证据前部）
       if (cli.cfg.think_mode == "ircot" && client) {
         auto llm_fn = [&](const std::string& prompt) {
@@ -367,55 +401,58 @@ int main(int argc, char** argv) {
 
   // 步骤4：LLM 批量答题
   if (cli.cfg.answer_mode == "llm" && llm_ans) {
-    // 两阶段聚合作答（--answer-mode aggregate）：聚合类问题先逐项提取事实再聚合
+    // 两阶段聚合作答（--answer-mode aggregate）：候选池 k_pool → 本地预过滤（BM25-lite
+    // 排序截断，零 LLM）→ 批量提取（agg_batch 条/次）→ 聚合作答
+    // 注意：候选召回在 case 循环内完成（引擎存活期），此处只做请求组装与执行。
     if (cli.cfg.answer_mode_agg == "aggregate") {
-      std::vector<int> agg_idx;            // 走两阶段的题
-      std::vector<ChatRequest> ex_reqs;    // 阶段一全部提取请求（跨题合并批量）
-      std::vector<std::pair<int, int>> ex_map;  // (题号, 证据编号)
-      for (size_t i = 0; i < pendings.size(); ++i) {
-        if (!LlmAnswerer::is_aggregate_question(pendings[i].q->question)) continue;
-        if (pendings[i].ev_texts.empty()) continue;
-        agg_idx.push_back((int)i);
-        for (size_t j = 0; j < pendings[i].ev_texts.size(); ++j) {
-          ex_reqs.push_back(LlmAnswerer::build_extract_request(
-              pendings[i].q->question, pendings[i].ev_texts[j]));
-          ex_map.emplace_back((int)i, (int)j);
+      std::vector<AggJob> jobs = std::move(agg_jobs);
+      // 批量提取（跨题合并批量）
+      std::vector<ChatRequest> ex_reqs;
+      std::vector<std::pair<int, int>> ex_map;  // (job 下标, 批内序号)
+      for (size_t ji = 0; ji < jobs.size(); ++ji) {
+        auto& evs = jobs[ji].evs;
+        for (size_t b = 0; b < evs.size(); b += (size_t)cli.cfg.agg_batch) {
+          size_t e = std::min(b + (size_t)cli.cfg.agg_batch, evs.size());
+          std::vector<std::string> part(evs.begin() + b, evs.begin() + e);
+          ex_reqs.push_back(LlmAnswerer::build_extract_batch_request(
+              pendings[jobs[ji].qi].q->question, part));
+          ex_map.emplace_back((int)ji, (int)b);
         }
       }
-      if (!agg_idx.empty()) {
-        std::fprintf(stderr, "[llm] 两阶段聚合 %zu 题：逐项提取 %zu 条...\n",
-                     agg_idx.size(), ex_reqs.size());
-        auto ex_resps = client->chat_batch(ex_reqs, cli.cfg.concurrency);
-        // 阶段二：按题聚合事实列表
-        std::vector<ChatRequest> ag_reqs;
-        std::vector<int> ag_map;
-        for (int ti : agg_idx) {
-          std::vector<std::string> facts;
-          for (size_t k = 0; k < ex_map.size(); ++k) {
-            if (ex_map[k].first != ti) continue;
-            const std::string& r = ex_resps[k];
-            if (!r.empty() && !LlmAnswerer::is_none(r)) {
-              facts.push_back("[E" + std::to_string(ex_map[k].second + 1) + "] " + r);
-            }
-          }
-          if (facts.empty()) {
-            pendings[ti].llm_answer = "NO INFORMATION";  // 空列表直接弃答
-            pendings[ti].llm_done = true;
-            continue;
-          }
-          ag_reqs.push_back(llm_ans->build_aggregate_request(
-              pendings[ti].q->question, pendings[ti].q->question_date, facts));
-          ag_map.push_back(ti);
-          std::fprintf(stderr, "  [agg] %s: %zu 条事实\n", pendings[ti].q->id.c_str(),
-                       facts.size());
+      if (!jobs.empty())
+        std::fprintf(stderr, "[llm] 两阶段聚合 %zu 题：预过滤+批量提取 %zu 次...\n",
+                     jobs.size(), ex_reqs.size());
+      auto ex_resps = client->chat_batch(ex_reqs, cli.cfg.concurrency);
+      // 阶段二：按题聚合事实列表
+      std::vector<ChatRequest> ag_reqs;
+      std::vector<int> ag_map;
+      for (size_t ji = 0; ji < jobs.size(); ++ji) {
+        std::vector<std::string> facts;
+        for (size_t k = 0; k < ex_map.size(); ++k) {
+          if (ex_map[k].first != (int)ji) continue;
+          for (auto& [ei, fact] : LlmAnswerer::parse_extract_batch(
+                   ex_resps[k], cli.cfg.agg_batch))
+            facts.push_back("[E" + std::to_string(ex_map[k].second + ei + 1) + "] " + fact);
         }
-        if (!ag_reqs.empty()) {
-          auto ag_resps = client->chat_batch(ag_reqs, cli.cfg.concurrency);
-          for (size_t k = 0; k < ag_map.size(); ++k) {
-            if (ag_resps[k].empty()) continue;
-            pendings[ag_map[k]].llm_answer = ag_resps[k];
-            pendings[ag_map[k]].llm_done = true;
-          }
+        int ti = jobs[ji].qi;
+        if (facts.empty()) {
+          pendings[ti].llm_answer = "NO INFORMATION";  // 空列表直接弃答
+          pendings[ti].llm_done = true;
+          continue;
+        }
+        ag_reqs.push_back(llm_ans->build_aggregate_request(
+            pendings[ti].q->question, pendings[ti].q->question_date, facts));
+        ag_map.push_back(ti);
+        std::fprintf(stderr, "  [agg] %s: %zu 条事实（%zu 次提取）\n",
+                     pendings[ti].q->id.c_str(), facts.size(),
+                     (jobs[ji].evs.size() + cli.cfg.agg_batch - 1) / cli.cfg.agg_batch);
+      }
+      if (!ag_reqs.empty()) {
+        auto ag_resps = client->chat_batch(ag_reqs, cli.cfg.concurrency);
+        for (size_t k = 0; k < ag_map.size(); ++k) {
+          if (ag_resps[k].empty()) continue;
+          pendings[ag_map[k]].llm_answer = ag_resps[k];
+          pendings[ag_map[k]].llm_done = true;
         }
       }
     }

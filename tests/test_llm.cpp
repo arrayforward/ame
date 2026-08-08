@@ -279,6 +279,25 @@ static void test_two_stage_aggregate() {
   CHECK(r2.messages[1].content.find("证据片段") == std::string::npos);  // 不走单阶段原文通道
 }
 
+// 批量提取 mock 测试：批量请求构造、解析（部分 NONE/编号错位/越界）、空列表判定
+static void test_extract_batch() {
+  // 批量请求：编号 + 保留思考
+  auto req = LlmAnswerer::build_extract_batch_request(
+      "我去了几个城市？", {"[2023-01-01] 搬到 Seattle", "[2023-02-01] 爬山", "[2023-03-01] 搬到 Portland"});
+  CHECK(req.messages[1].content.find("[E2]") != std::string::npos);
+  CHECK(!req.opts.disable_thinking);
+  // 解析：E1 事实、E2 NONE、E4 越界、E1 重复取首次
+  auto facts = LlmAnswerer::parse_extract_batch(
+      "[E1]: 搬到 Seattle\n[E2]: NONE\n[E3]: 搬到 Portland\n[E4]: 越界\n[E1]: 重复忽略\n", 3);
+  CHECK(facts.size() == 2);
+  CHECK(facts[0].first == 0 && facts[1].first == 2);
+  // 全 NONE → 空列表
+  CHECK(LlmAnswerer::parse_extract_batch("[E1]: NONE\n[E2]: none\n", 2).empty());
+  // 乱序/杂行宽容
+  auto f2 = LlmAnswerer::parse_extract_batch("前言废话\n[E2]: 只收 E2\n", 2);
+  CHECK(f2.size() == 1 && f2[0].first == 1);
+}
+
 int main() {
   test_client_cache_and_retry();
   test_chat_batch();
@@ -288,6 +307,7 @@ int main() {
   test_lexicon();
   test_lexicon_split();
   test_two_stage_aggregate();
+  test_extract_batch();
   // 集成测试（真实 API）默认跳过
   if (std::getenv("AME_RUN_LLM_IT")) {
     auto client = DeepSeekClient::from_config("bench/config/deepseek.local.json",

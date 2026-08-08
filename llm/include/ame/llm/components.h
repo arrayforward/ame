@@ -57,6 +57,12 @@ class LlmAnswerer {
   // 阶段一：单条证据的逐项提取请求（相关事实或 NONE；关思考加速）
   static ChatRequest build_extract_request(const std::string& question,
                                            const std::string& evidence_text);
+  // 批量提取：一次喂 n 条编号证据，逐条输出 [E#]: 事实 或 [E#]: NONE
+  static ChatRequest build_extract_batch_request(
+      const std::string& question, const std::vector<std::string>& evidence_texts);
+  // 批量提取解析：{证据编号(0 起): 事实}；NONE/空/编号缺失宽容跳过
+  static std::vector<std::pair<int, std::string>> parse_extract_batch(
+      const std::string& resp, int n_evidence);
   // 逐项提取结果判定：NONE/空 视为无关
   static bool is_none(const std::string& resp);
   // 阶段二：基于逐项事实列表（不含原文长片段）的聚合作答请求
