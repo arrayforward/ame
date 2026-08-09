@@ -4,6 +4,7 @@
  * 弃答门控、知识更新（SUPERSEDES + current/as_of）、事件排序 order_events。
  */
 #include <algorithm>
+#include <ctime>
 #include <filesystem>
 
 #include "ame/bench/bench.h"
@@ -247,6 +248,52 @@ static void test_chinese_lexicon() {
   }
 }
 
+// 会话日期解析：LoCoMo 月名格式（"1:56 pm on 8 May, 2023"）+ 数字格式回归
+//（月名缺失时时分数字曾被误判为月/日 → 全部会话落入合成时间，cat2 时序题全灭的根因）。
+static void test_parse_session_date() {
+  auto expect = [](int y, int m, int d, int hh, int mm) {
+    std::tm tm{};
+    tm.tm_year = y - 1900;
+    tm.tm_mon = m - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = hh;
+    tm.tm_min = mm;
+    return (TimePoint)timegm(&tm);
+  };
+  // LoCoMo 月名格式：D Mon, Y + 12 小时制时刻
+  CHECK(parse_session_date("1:56 pm on 8 May, 2023", 0) == expect(2023, 5, 8, 13, 56));
+  CHECK(parse_session_date("1:14 pm on 25 May, 2023", 0) == expect(2023, 5, 25, 13, 14));
+  CHECK(parse_session_date("10:02 am on 2 July, 2023", 0) == expect(2023, 7, 2, 10, 2));
+  // Mon D, Y 变体（无时刻默认正午）
+  CHECK(parse_session_date("May 8, 2023", 0) == expect(2023, 5, 8, 12, 0));
+  // 数字格式回归：Y-M-D 与 M/D/Y
+  CHECK(parse_session_date("2023/05/30 (Tue) 23:40", 0) == expect(2023, 5, 30, 23, 40));
+  CHECK(parse_session_date("5/25/2023", 0) == expect(2023, 5, 25, 12, 0));
+  // 无法解析 → fallback
+  CHECK(parse_session_date("no date here", 42) == 42);
+}
+
+// 证据终排（时序题）：think 并入的近期客套证据不得盖过词面精确命中的旧金标事件
+//（locomo_v3 cat2 实测失败模式："charity race" 金标被时近偏置顶到第 9 位）。
+static void test_evidence_content_rerank() {
+  Engine e;
+  const TimePoint old_ts = 1700000000;
+  const TimePoint new_ts = old_ts + 180 * 86400;  // 180 天后（时近偏置拉满）
+  e.remember_turn("Melanie", "I ran a charity race for mental health last Saturday.",
+                  old_ts, "D2:1", "s2");
+  for (int i = 0; i < 5; ++i)  // 近期客套轮：同实体、零内容词重叠
+    e.remember_turn("Melanie", "Thanks so much, your words really mean a lot to me.",
+                    new_ts + i * 60, "D9:" + std::to_string(i + 1), "s9");
+  BenchConfig cfg;  // 默认 entity-profile / think 均开（时序题触发 think 并入）
+  BenchQuestion q;
+  q.question = "When did Melanie run a charity race?";
+  auto r = answer(e, q, cfg);
+  CHECK(!r.evidence_uids.empty());
+  const Node* front = e.storage().get_node(r.evidence_uids.front());
+  CHECK(front != nullptr);
+  CHECK(front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+}
+
 int main() {
   test_load_fixtures();
   test_ingest_graph();
@@ -256,5 +303,7 @@ int main() {
   test_order_events();
   test_snapshot_with_slots();
   test_chinese_lexicon();
+  test_evidence_content_rerank();
+  test_parse_session_date();
   return AME_TEST_REPORT();
 }

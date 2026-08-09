@@ -229,6 +229,14 @@ int main(int argc, char** argv) {
   std::vector<AggJob> agg_jobs;
 
   for (auto& c : cases) {
+    // --question-ids 固定样本提速：该 case 无任何被请求的问题 → 整个跳过（含摄入）。
+    // 安全性：每 case 独立引擎、跨 case 无共享状态，未命中 case 的摄入对结果零影响。
+    if (!only_qids.empty()) {
+      bool any = false;
+      for (auto& q : c.questions)
+        if (only_qids.count(q.id)) { any = true; break; }
+      if (!any) continue;
+    }
     // 跨 case 隔离；--feedback-dir 启用 M11/M14（每 case 独立目录）。
     // 注意：只有启用反馈时才保活 Engine（判分阶段回流用）；否则每 case 用完即销毁，
     // 避免百级 case 的全量图驻留内存（OOM 风险）。

@@ -17,6 +17,7 @@
 #include <ctime>
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 namespace ame {
 
@@ -36,11 +37,90 @@ static std::string jstr(const Json* j, const char* key) {
 }
 
 // parse_session_date 伪代码：
+//   步骤0（月名格式优先）：串中含英文月名（jan..dec，词边界匹配）→ 按 D-Mon-Y 解析
+//          （LoCoMo："1:56 pm on 8 May, 2023" / "May 8, 2023"）——月名不在时数字
+//          扫描会把时分 1:56 误判为月/日导致整体解析失败落入合成时间
+//          （locomo_v3 cat2 judge 0.072 的根因：全部会话时间戳合成）；
+//          年取首个 ≥1970 的 4 位数，日取月名紧邻的 1~31 数字（前邻优先，后邻次之），
+//          时刻取 "H:MM" 冒号对 + am/pm 修正，无时刻默认正午；
 //   步骤1：从字符串中扫描出前 3 个整数（忽略非数字分隔符）；
 //   步骤2：若首段长度为 4 → 按 Y-M-D 解释，否则按 M/D/Y 解释（美式）；
 //   步骤3：再尝试扫描时分（第 4/5 个整数）；timegm 转 UTC epoch；
 //   步骤4：任何一步失败或数量不足 → 返回 fallback。
 TimePoint parse_session_date(const std::string& s, TimePoint fallback) {
+  // 步骤0：月名格式（D Mon Y / Mon D Y）
+  {
+    static const char* kMonths[] = {"jan", "feb", "mar", "apr", "may", "jun",
+                                    "jul", "aug", "sep", "oct", "nov", "dec"};
+    static const char* kMonthsFull[] = {
+        "january", "february", "march",     "april",   "may",      "june",
+        "july",    "august",   "september", "october", "november", "december"};
+    std::string sl;
+    for (char c : s) sl += (char)std::tolower((unsigned char)c);
+    int mon = 0;
+    size_t mpos = std::string::npos, mlen = 0;
+    for (int m = 0; m < 12 && mon == 0; ++m) {
+      size_t p = 0;
+      while ((p = sl.find(kMonths[m], p)) != std::string::npos) {
+        bool lb = p == 0 || !std::isalpha((unsigned char)sl[p - 1]);
+        // 右边界：缩写命中要求后继非字母；全名命中（july/sept 等）按全名长度要求
+        size_t fl = std::strlen(kMonthsFull[m]);
+        bool full = sl.compare(p, fl, kMonthsFull[m]) == 0;
+        size_t end = p + (full ? fl : 3);
+        bool rb = end >= sl.size() || !std::isalpha((unsigned char)sl[end]);
+        if (lb && rb) { mon = m + 1; mpos = p; mlen = full ? fl : 3; break; }
+        ++p;
+      }
+    }
+    if (mon > 0) {
+      // 扫描全部整数及其位置（时分识别用冒号，am/pm 修正时刻）
+      std::vector<std::pair<int, size_t>> nums;  // (值, 起始位置)
+      for (size_t i = 0; i < sl.size();) {
+        if (std::isdigit((unsigned char)sl[i])) {
+          size_t st = i;
+          int v = 0;
+          while (i < sl.size() && std::isdigit((unsigned char)sl[i]))
+            v = v * 10 + (sl[i++] - '0');
+          nums.emplace_back(v, st);
+        } else {
+          ++i;
+        }
+      }
+      int year = 0, day = 0;
+      for (auto& [v, p] : nums)
+        if (v >= 1970 && v <= 2100) { year = v; break; }
+      // 日：月名前邻数字（"8 May"）优先，后邻（"May 8"）次之
+      for (auto& [v, p] : nums)
+        if (p < mpos && v >= 1 && v <= 31) day = v;  // 取月名前最后一个候选
+      if (day == 0)
+        for (auto& [v, p] : nums)
+          if (p >= mpos + mlen && v >= 1 && v <= 31 && v != year) { day = v; break; }
+      if (year == 0 || day == 0) return fallback;
+      // 时刻："H:MM" 冒号对（pm 且 H<12 → +12；am 且 H==12 → 0）
+      int hour = 12, minute = 0;
+      for (size_t k = 0; k + 1 < nums.size(); ++k) {
+        size_t colon = nums[k].second + std::to_string(nums[k].first).size();
+        if (colon < sl.size() && sl[colon] == ':') {
+          hour = nums[k].first;
+          minute = nums[k + 1].first;
+          bool pm = sl.find("pm", colon) != std::string::npos;
+          bool am = sl.find("am", colon) != std::string::npos;
+          if (pm && hour < 12) hour += 12;
+          if (am && hour == 12) hour = 0;
+          break;
+        }
+      }
+      if (hour > 23 || minute > 59) return fallback;
+      std::tm tm{};
+      tm.tm_year = year - 1900;
+      tm.tm_mon = mon - 1;
+      tm.tm_mday = day;
+      tm.tm_hour = hour;
+      tm.tm_min = minute;
+      return (TimePoint)timegm(&tm);
+    }
+  }
+  // 步骤1~4：纯数字格式（Y-M-D / M/D/Y）
   int nums[5] = {0};
   int n = 0;
   size_t i = 0;
