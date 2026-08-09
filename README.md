@@ -146,14 +146,35 @@ k_pool 候选池（~50 条）→ 本地预过滤（池内 BM25-lite，零 LLM，
 | LongMemEval | github.com/xiaowu0162/LongMemEval（`longmemeval_s.json`） | recall@k（answer_session_ids 命中）、judge、abstention |
 | BEAM | github.com/mohammadtavakoli78/BEAM | nugget 词重叠代理分（IJudge 可换真实 LLM）、event_ordering Kendall tau-b |
 
-**当前指标（最优管线：rule 摄入 + 实体档案 + 蒸馏词典 + 查询扩展 + 池内 BM25-lite +
+**当前指标（最优管线：rule 摄入 + 实体档案 + 蒸馏词典 + 查询扩展 + 证据内容词终排 +
 NEXT±1 + think + k_pool）**：
 
 | 基准 | recall@10 | judge | 备注 |
 |---|---|---|---|
-| LoCoMo sample50（固定 50 题） | **0.542** | **0.440** | 起点 0.271/0.220，详见迭代记录 |
-| LoCoMo 全量 v2（1986 题） | 0.337 | 0.190 | 全量 LLM 管线 |
+| LoCoMo sample50（固定 50 题） | 0.500 | **0.500** | 起点 0.271/0.220；recall 0.542→0.500 微降、judge 0.440→0.500 |
+| LoCoMo 全量 v3（1986 题） | 0.654（cat2） | 0.375 | **修复前口径**（未含日期解析/终排修复），待重跑刷新 |
+| LongMemEval 全量 500 | 0.672 | 0.398 | **修复前口径**（未含偏好题修复），待重跑刷新 |
 | LongMemEval 前 100 | **0.820** | **0.590** | single-session 0.757 / multi-session 0.200 |
+
+**全量评测失败点修复（失败分析驱动，A/B 验证）**：
+
+- **LoCoMo cat2 时序题（judge 0.072）**：双根因。① LoCoMo 会话日期格式
+  "1:56 pm on 8 May, 2023" 未被 `parse_session_date` 识别（时分数字被误判为月/日），
+  全部会话落入合成时间戳，LLM 拿到的证据日期全错；② think 证据并入选址带时近偏置，
+  词面精确命中的金标被顶到队尾。修复：月名日期解析 + 证据内容词 BM25-lite 终排
+  （recall 大候选池不提前截断，终排后才截 top-k）。A/B（12 题抽样）：judge 0/12 → 11/12。
+- **LME single-session-preference（judge 0/30，recall 0.233）**：根因是实体通道第一人称
+  映射按 INVOLVES 度数盲选主说话人——assistant（258）高于 user（250）导致错选助手实体，
+  检索池错位遮蔽了标准管道的正确召回。修复：角色感知第一人称（优先 user 角色、排除
+  assistant 角色）+ 通道弃权回退（弱通道结果不再遮蔽标准召回）+ 弃答门控对内容词
+  精确命中豁免。A/B（30 题全量）：judge 0/30 → 8/30，recall 0.233 → 0.633，
+  误弃答 23/30 → 14/30。
+
+> ⚠️ **日期解析 bug 影响面（显著标注）**：该 bug 使 LoCoMo 全部会话时间戳落入合成值
+> （2023-11-14 起按会话序递增），修复前所有涉及时序的口径均被污染——cat2 时序题
+> （证据日期标签全错）、SUPERSEDES 新旧过滤、rerank 时间衰减项、证据日期前缀。
+> 上表 v3 / LME 500 全量数字均为修复前口径；cat2（0/12→11/12）与 LME 偏好题
+>（0/30→8/30）为小样本 A/B 口径，全量重跑后刷新。
 
 ### 已否证的假设
 
