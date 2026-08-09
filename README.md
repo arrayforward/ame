@@ -138,7 +138,9 @@ k_pool 候选池（~50 条）→ 本地预过滤（池内 BM25-lite，零 LLM，
 
 ## 四、基准评测
 
-三个长期记忆基准的离线评测管线（数据获取见各 README，数据文件不入库）：
+三个长期记忆基准的离线评测管线（数据获取见各 README，数据文件不入库）。
+**完整评测报告与失败分析见 [docs/reports/](docs/reports/README.md)**
+（[LoCoMo 报告](docs/reports/locomo_report.md) / [LongMemEval 报告](docs/reports/longmemeval_report.md)）：
 
 | 基准 | 数据获取 | 指标口径 |
 |---|---|---|
@@ -252,7 +254,7 @@ llm/          # DeepSeek 接入（客户端/提取器/答题器/评审器/词典
 lexicon/      # 词库资产（68万+ 词条，含 README 与 lexicon_src 整理中间层）
 tests/        # 18 个测试可执行（模块单测 + e2e + bench + llm，ctest 注册）
 demo/         # 中文演示程序
-docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实现与优化文档）
+docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实现与优化文档，reports/ 评测报告）
 ```
 
 ### 答题链路的模块联动（QA pipeline 全模块角色表）
