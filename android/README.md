@@ -7,13 +7,13 @@
 ## 架构
 
 ```
-┌─ App（Kotlin）────────────────────────────────┐
+┌─ App（Java）────────────────────────────────┐
 │  MainActivity（session 列表：新建/进入/删除）  │
 │  ChatActivity（消息列表 + 输入）               │
 │  MemoryOrchestrator ── 每轮流水线：            │
 │    ① remember_turn(user)                       │
 │    ② 装配上下文 = 档案槽位 + recall 证据        │
-│       （带时间戳） + 最近 10 轮原文滑窗         │
+│       （带时间戳） + 最近 8 条原文滑窗（4 轮）         │
 │    ③ MiniMaxClient 整段作答（OkHttp）          │
 │  ④ remember_turn(assistant) + jsonl + 快照    │
 └──────────────┬─────────────────────────────────┘
@@ -23,7 +23,7 @@
 │  core/storage/time/vector/extractor/entity/    │
 │  keyword/graph_writer/seed/diffusion/rerank/   │
 │  thinker/feedback/learning/engine              │
-│  （llm/bench 不进 Android；联网在 Kotlin 侧）   │
+│  （llm/bench 不进 Android；联网在 Java 侧）   │
 └────────────────────────────────────────────────┘
 ```
 
@@ -63,7 +63,7 @@ sdk.dir=<Android SDK 路径>
 MINIMAX_API_KEY=<你的 key>
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 MINIMAX_MODEL=MiniMax-M3
-CONTEXT_WINDOW_TURNS=10      # 可选：滑动窗口轮数（状态栏同步显示）
+CONTEXT_WINDOW_TURNS=8       # 可选：滑动窗口消息条数（8 条=4 轮，状态栏同步显示）
 RECALL_TOP_K=5               # 可选：recall 证据条数（状态栏同步显示）
 ```
 
@@ -93,14 +93,14 @@ RECALL_TOP_K=5               # 可选：recall 证据条数（状态栏同步显
   NEXT 链由引擎自动完成），轮后 `save()` 快照。
 - **读取**：用户档案槽位（居住地/职业/偏好等，双时态当前值）+ 对当前输入做
   recall 取 top-5 证据（带 `[yyyy-MM-dd]` 时间戳，供模型时序推断）。
-- **滑窗**：最近 10 轮原文直进上下文；更早的历史不进 prompt，只在 AME 图中，
+- **滑窗**：最近 8 条（4 轮）原文直进上下文；更早的历史不进 prompt，只在 AME 图中，
   由 recall 按需取证——上下文长度恒定，记忆容量无界。
 - **session 隔离**：每个 session 独立 Engine 实例与快照文件；删除 session 时
   目录（消息+快照）递归清除。
 
 ## 状态栏（上下文外置可视化）
 
-聊天页顶部实时对比行：`记忆 N轮 ~Xtok │ 发送 Ytok │ 压缩 Z× │ 节点 M │ 窗口10+证据5`。
+聊天页顶部实时对比行：`记忆 N轮 ~Xtok │ 发送 Ytok │ 压缩 Z× │ 节点 M │ 窗口8+证据5`。
 
 - **累计记忆**：引擎内总轮数（`Engine::stats().turns`）与 token 估算
   （`total_chars/2`，中英混合均值口径）——随对话无限增长。
@@ -109,7 +109,19 @@ RECALL_TOP_K=5               # 可选：recall 证据条数（状态栏同步显
   滑窗+证据装配下恒定有界。
 - **压缩比** = 累计/发送；节点数展示记忆图规模（事件+实体+关键词）。
 - 数据通路：JNI `nativeStats()` → `{turns,total_chars,events,nodes}`；
-  发送侧估算在 Kotlin 装配时累计。
+  发送侧估算在 Java 装配时累计。
+
+## 联网搜索（输入栏「联网」开关）
+
+- 实现：开「联网」后本轮改走 MiniMax 托管 `web_search`（OpenAI Responses API
+  `{BASE_URL}/responses`，声明 `tools=[{"type":"web_search"}]`），**单次请求内完成
+  搜索+作答**，M3 直接给出带引用来源的答案——不是"先搜索再让 M3 二次作答"的两段式。
+- 记忆闭环：联网作答的整轮照常写成"提问 → 回答"记忆事件，后续轮次可被 recall
+  召回（时效性答案沉淀为记忆）。
+- 带图轮：Responses 协议不支持图片输入——先用 M3 vision 把图片解析成文本
+  （详细描述关键信息，供搜索命中），并入查询后走联网搜索。
+- 实测备注：`/v1/chat/completions` 带 web_search 工具返回 400；Responses 接口
+  的 `input` 用完整 messages 数组即可（带历史），顶层 `output_text` 为最终答案。
 
 ## 多模态输入
 

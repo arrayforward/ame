@@ -5,7 +5,6 @@
 //   - MiniMax key 从 local.properties（gitignore）读入 BuildConfig，代码/日志不落 key。
 plugins {
     id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
 }
 
 // local.properties：sdk.dir 由 AGP 自读；这里只取自定义项（MINIMAX_API_KEY 等）
@@ -27,8 +26,9 @@ android {
         buildConfigField "String", "MINIMAX_API_KEY", "\"${lp.getProperty('MINIMAX_API_KEY', '')}\""
         buildConfigField "String", "MINIMAX_BASE_URL", "\"${lp.getProperty('MINIMAX_BASE_URL', 'https://api.minimaxi.com/v1')}\""
         buildConfigField "String", "MINIMAX_MODEL", "\"${lp.getProperty('MINIMAX_MODEL', 'MiniMax-M3')}\""
-        // 装配上限（可调，状态栏同步显示）：滑窗轮数 + recall 证据条数
-        buildConfigField "int", "CONTEXT_WINDOW_TURNS", "${lp.getProperty('CONTEXT_WINDOW_TURNS', '10')}"
+        // 装配上限（可调，状态栏同步显示）：滑窗消息条数 + recall 证据条数
+        // 滑窗默认 8 条 = 4 轮对话：recall 修复后更早历史靠证据取证，窗口过长浪费 token
+        buildConfigField "int", "CONTEXT_WINDOW_TURNS", "${lp.getProperty('CONTEXT_WINDOW_TURNS', '8')}"
         buildConfigField "int", "RECALL_TOP_K", "${lp.getProperty('RECALL_TOP_K', '5')}"
         externalNativeBuild {
             cmake {
@@ -54,7 +54,6 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = '17' }
     buildFeatures { buildConfig true }
 }
 

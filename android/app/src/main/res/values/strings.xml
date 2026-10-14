@@ -12,4 +12,6 @@
     <string name="empty_sessions">暂无会话，点上方按钮新建</string>
     <string name="empty_guides">暂无导览方案，点上方按钮选择 PDF 导入（一个游客一个 session）</string>
     <string name="plan_button">方案</string>
+    <string name="diag_button">诊断</string>
+    <string name="web_button">联网</string>
 </resources>

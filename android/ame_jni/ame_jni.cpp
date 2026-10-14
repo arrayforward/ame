@@ -23,7 +23,9 @@
 
 #include "ame/engine/engine.h"
 
-#define LOG_TAG "ame_jni"
+#define LOG_TAG "AmeMem"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -39,12 +41,131 @@ ame::Engine* get(jlong h) {
   return it == g_engines.end() ? nullptr : it->second.get();
 }
 
+// MUTF-8（JNI NewStringUTF/GetStringUTFChars 的编码）与标准 UTF-8 互转。
+// 唯一差异是 U+10000 以上字符（emoji 等）：标准 UTF-8 用 4 字节，MUTF-8 用
+// UTF-16 代理对拆成两个 3 字节序列。直接互通会把 emoji 变成乱码——
+// 出引擎文本进 NewStringUTF 前转 MUTF-8；GetStringUTFChars 拿到的转回 UTF-8。
+// （NUL 的 MUTF-8 编码 0xC0 0x80 也一并处理。）
+std::string utf8_to_mutf8(const std::string& s) {
+  std::string o;
+  auto push_utf8 = [&](unsigned cp) {
+    if (cp < 0x80) o += (char)cp;
+    else if (cp < 0x800) {
+      o += (char)(0xC0 | (cp >> 6));
+      o += (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+      o += (char)(0xE0 | (cp >> 12));
+      o += (char)(0x80 | ((cp >> 6) & 0x3F));
+      o += (char)(0x80 | (cp & 0x3F));
+    } else {
+      o += (char)(0xF0 | (cp >> 18));
+      o += (char)(0x80 | ((cp >> 12) & 0x3F));
+      o += (char)(0x80 | ((cp >> 6) & 0x3F));
+      o += (char)(0x80 | (cp & 0x3F));
+    }
+  };
+  for (size_t i = 0; i < s.size();) {
+    unsigned char c = (unsigned char)s[i];
+    unsigned cp;
+    size_t len;
+    if (c < 0x80) { cp = c; len = 1; }
+    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+    else { o += s[i++]; continue; }  // 非法字节原样透传
+    bool ok = i + len <= s.size();
+    for (size_t j = 1; ok && j < len; ++j) {
+      unsigned char cc = (unsigned char)s[i + j];
+      if ((cc & 0xC0) != 0x80) ok = false;
+      else cp = (cp << 6) | (cc & 0x3F);
+    }
+    if (!ok) { o += s[i++]; continue; }
+    i += len;
+    if (cp == 0) { o += "\xC0\x80"; continue; }        // NUL 的 MUTF-8 编码
+    if (cp >= 0x10000) {                                // 代理对拆分
+      cp -= 0x10000;
+      push_utf8(0xD800 + (cp >> 10));
+      push_utf8(0xDC00 + (cp & 0x3FF));
+    } else {
+      push_utf8(cp);
+    }
+  }
+  return o;
+}
+
+std::string mutf8_to_utf8(const std::string& s) {
+  std::string o;
+  auto push_utf8 = [&](unsigned cp) {
+    if (cp < 0x80) o += (char)cp;
+    else if (cp < 0x800) {
+      o += (char)(0xC0 | (cp >> 6));
+      o += (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+      o += (char)(0xE0 | (cp >> 12));
+      o += (char)(0x80 | ((cp >> 6) & 0x3F));
+      o += (char)(0x80 | (cp & 0x3F));
+    } else {
+      o += (char)(0xF0 | (cp >> 18));
+      o += (char)(0x80 | ((cp >> 12) & 0x3F));
+      o += (char)(0x80 | ((cp >> 6) & 0x3F));
+      o += (char)(0x80 | (cp & 0x3F));
+    }
+  };
+  for (size_t i = 0; i < s.size();) {
+    unsigned char c = (unsigned char)s[i];
+    unsigned cp;
+    size_t len;
+    if (c == 0xC0 && i + 1 < s.size() && (unsigned char)s[i + 1] == 0x80) {
+      o += '\0'; i += 2; continue;                      // MUTF-8 的 NUL
+    }
+    if (c < 0x80) { cp = c; len = 1; }
+    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+    else { o += s[i++]; continue; }
+    bool ok = i + len <= s.size();
+    for (size_t j = 1; ok && j < len; ++j) {
+      unsigned char cc = (unsigned char)s[i + j];
+      if ((cc & 0xC0) != 0x80) ok = false;
+      else cp = (cp << 6) | (cc & 0x3F);
+    }
+    if (!ok) { o += s[i++]; continue; }
+    i += len;
+    // 代理对合并回 4 字节 UTF-8（MUTF-8 的 4 字节字符是代理对形态）
+    if (cp >= 0xD800 && cp <= 0xDBFF && i + 2 < s.size() + 1) {
+      unsigned char c2 = i < s.size() ? (unsigned char)s[i] : 0;
+      if ((c2 & 0xF0) == 0xE0) {
+        unsigned lo = c2 & 0x0F;
+        bool ok2 = true;
+        for (size_t j = 1; ok2 && j < 3; ++j) {
+          unsigned char cc = (unsigned char)s[i + j];
+          if ((cc & 0xC0) != 0x80) ok2 = false;
+          else lo = (lo << 6) | (cc & 0x3F);
+        }
+        if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF) {
+          i += 3;
+          push_utf8(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00));
+          continue;
+        }
+      }
+    }
+    push_utf8(cp);
+  }
+  return o;
+}
+
+// jstr：引擎侧 UTF-8 文本 → Java 字符串（经 MUTF-8 转换，防 emoji 乱码）
+jstring jstr(JNIEnv* env, const std::string& utf8) {
+  std::string m = utf8_to_mutf8(utf8);
+  return env->NewStringUTF(m.c_str());
+}
+
 std::string j2s(JNIEnv* env, jstring js) {
   if (!js) return "";
   const char* p = env->GetStringUTFChars(js, nullptr);
   std::string s(p ? p : "");
   if (p) env->ReleaseStringUTFChars(js, p);
-  return s;
+  return mutf8_to_utf8(s);  // MUTF-8 → UTF-8（用户输入含 emoji 时防写入乱码）
 }
 
 // JSON 字符串转义（引号/反斜杠/控制字符/换行）
@@ -88,7 +209,13 @@ JNIEXPORT jlong JNICALL Java_com_ame_memory_AmeEngine_nativeCreateSession(JNIEnv
     FILE* f = std::fopen(sp.c_str(), "rb");
     if (f) {
       std::fclose(f);
-      if (e->load(sp) != ame::Err::Ok) LOGE("snapshot load failed: %s", sp.c_str());
+      if (e->load(sp) != ame::Err::Ok)
+        LOGE("snapshot load failed: %s", sp.c_str());
+      else
+        LOGI("createSession: 加载快照 %s（turns=%ld nodes=%ld）", sp.c_str(),
+             e->stats().turns, e->stats().nodes);
+    } else {
+      LOGI("createSession: 无快照，全新记忆 %s", d.c_str());
     }
   }
   std::lock_guard<std::mutex> lk(g_mu);
@@ -111,6 +238,7 @@ JNIEXPORT void JNICALL Java_com_ame_memory_AmeEngine_nativeDestroySession(JNIEnv
   }
   std::string d = j2s(env, dir);
   if (!d.empty()) e->save(snapshot_path(d));
+  LOGI("destroySession: 快照兜底落盘 %s（turns=%ld）", d.c_str(), e->stats().turns);
 }
 
 // nativeRememberTurn 伪代码：透传 Engine::remember_turn（speaker/text/ts/diaId/sessionId），
@@ -120,13 +248,19 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeRememberTurn(
     jstring session_id) {
   auto* e = get(h);
   if (!e) return -1;
-  auto r = e->remember_turn(j2s(env, speaker), j2s(env, text), (ame::TimePoint)ts,
+  std::string t = j2s(env, text);
+  auto r = e->remember_turn(j2s(env, speaker), t, (ame::TimePoint)ts,
                             j2s(env, dia_id), j2s(env, session_id));
+  if (r.code != ame::Err::Ok)
+    LOGE("rememberTurn(%s) 失败 code=%d: %.120s", j2s(env, speaker).c_str(),
+         (int)r.code, t.c_str());
   return (jint)r.code;
 }
 
 // nativeRecall 伪代码：SeedQuery{text=query} 走默认 recall 管道（limit 截断），结果
 // 序列化为 JSON 数组 [{text,ts,score}]；无引擎/无结果返回 "[]"。
+// 软种子阈值降到 0.2（引擎默认 0.5）：哈希向量是词面弱基线，端上自然短查询
+// 与事件的余弦普遍 <0.5，0.5 会把软通道整个废掉（bench 英文场景亦用 0.15）。
 JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env, jclass,
                                                                      jlong h, jstring query,
                                                                      jint limit) {
@@ -135,7 +269,9 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env
   ame::SeedQuery sq;
   sq.text = j2s(env, query);
   sq.lex_topk = 30;
+  sq.soft_min_sim = 0.2;
   auto rr = e->recall(sq, {}, 2, limit > 0 ? limit : 5, false);
+  LOGD("nativeRecall: '%.60s' -> %zu 条", sq.text.c_str(), rr.events.size());
   std::string out = "[";
   bool first = true;
   for (auto& se : rr.events) {
@@ -144,10 +280,13 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env
     first = false;
     out += "{\"text\":\"" + jesc(se.event->text) + "\",\"ts\":" +
            std::to_string((long long)se.event->ts) +
-           ",\"score\":" + std::to_string(se.score) + "}";
+           ",\"score\":" + std::to_string(se.score);
+    auto sp = se.event->attrs.find("speaker");
+    if (sp != se.event->attrs.end()) out += ",\"speaker\":\"" + jesc(sp->second) + "\"";
+    out += "}";
   }
   out += "]";
-  return env->NewStringUTF(out.c_str());
+  return jstr(env, out);
 }
 
 // nativeGetProfile 伪代码：取 INVOLVES 度数最高的 person 实体（用户代理）的档案
@@ -178,7 +317,7 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeGetProfile(JNIEnv*
            "\",\"valid_from\":" + std::to_string((long long)s.valid_from) + "}";
   }
   out += "]}";
-  return env->NewStringUTF(out.c_str());
+  return jstr(env, out);
 }
 
 // nativeStats 伪代码：Engine::stats() 序列化为 JSON {turns,total_chars,events,nodes}
@@ -192,7 +331,7 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeStats(JNIEnv* env,
                     ",\"total_chars\":" + std::to_string(s.total_chars) +
                     ",\"events\":" + std::to_string(s.events) +
                     ",\"nodes\":" + std::to_string(s.nodes) + "}";
-  return env->NewStringUTF(out.c_str());
+  return jstr(env, out);
 }
 
 // nativeSave/nativeLoad 伪代码：显式快照落盘/恢复到 dir/graph.json，返回 Err 码。
