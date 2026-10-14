@@ -29,8 +29,8 @@ android {
         applicationId "com.ame.memory"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "0.1"
+        versionCode 10
+        versionName "1.0"
         buildConfigField "String", "MINIMAX_API_KEY", "\"${lp.getProperty('MINIMAX_API_KEY', '')}\""
         buildConfigField "String", "MINIMAX_BASE_URL", "\"${lp.getProperty('MINIMAX_BASE_URL', 'https://api.minimaxi.com/v1')}\""
         buildConfigField "String", "MINIMAX_MODEL", "\"${lp.getProperty('MINIMAX_MODEL', 'MiniMax-M3')}\""
@@ -46,9 +46,16 @@ android {
         }
     }
 
+    signingConfigs {
+        // 本地发布用 debug 密钥签名（正式上架再换发布密钥）
+        debug {}
+    }
     buildTypes {
         debug { minifyEnabled false }
-        release { minifyEnabled false }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
     }
 
     externalNativeBuild {
