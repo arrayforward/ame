@@ -227,8 +227,8 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
 
       // CJK 词法种子（中文无分词器：以 M1 词典提取的中文词为内容词，
       // 子串匹配事件原文；同义扩展经别名表，权重规则与 ASCII 通道一致）
-      if (extractor_) {
-        Extraction cex = extractor_->extract(q.text);
+      {
+        Extraction cex = extractor_ ? extractor_->extract(q.text) : Extraction{};
         std::vector<std::string> cjks;
         for (auto& k : cex.keywords)
           if (!k.word.empty() && (unsigned char)k.word[0] >= 128) cjks.push_back(k.word);
@@ -273,6 +273,81 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
               }
             if (m >= 1 && s > 0)  // CJK 词多为整词，m≥1 即收录
               add(n->uid, 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0), "lex");
+          }
+        } else {
+          // 词典未加载/Android 端等场景 M1 提不出中文词时，退回查询文本的
+          // CJK 字符二元组做子串匹配（不扩展同义词）；≥2 个二元组命中才收录，
+          // 防"的/是/了"周边二元组单命中噪声。纯兜底通道，词典在时不会走到。
+          std::vector<std::string> grams;
+          auto push_cp = [&](unsigned cp, std::string& out) {
+            if (cp < 0x80) out += (char)cp;
+            else if (cp < 0x800) {
+              out += (char)(0xC0 | (cp >> 6));
+              out += (char)(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+              out += (char)(0xE0 | (cp >> 12));
+              out += (char)(0x80 | ((cp >> 6) & 0x3F));
+              out += (char)(0x80 | (cp & 0x3F));
+            } else {
+              out += (char)(0xF0 | (cp >> 18));
+              out += (char)(0x80 | ((cp >> 12) & 0x3F));
+              out += (char)(0x80 | ((cp >> 6) & 0x3F));
+              out += (char)(0x80 | (cp & 0x3F));
+            }
+          };
+          std::vector<unsigned> cps;
+          for (size_t i = 0; i < q.text.size();) {
+            unsigned char c = (unsigned char)q.text[i];
+            unsigned cp;
+            size_t len;
+            if (c < 0x80) { cp = c; len = 1; }
+            else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+            else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+            else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+            else { ++i; continue; }
+            bool ok = i + len <= q.text.size();
+            for (size_t j = 1; ok && j < len; ++j) {
+              unsigned char cc = (unsigned char)q.text[i + j];
+              if ((cc & 0xC0) != 0x80) ok = false;
+              else cp = (cp << 6) | (cc & 0x3F);
+            }
+            i += ok ? len : 1;
+            if (ok && cp > 0x2E7F) cps.push_back(cp);
+          }
+          for (size_t i = 0; i + 1 < cps.size(); ++i) {
+            std::string g;
+            push_cp(cps[i], g);
+            push_cp(cps[i + 1], g);
+            grams.push_back(g);
+          }
+          if (grams.empty() && cps.size() == 1) {
+            std::string g;
+            push_cp(cps[0], g);
+            grams.push_back(g);
+          }
+          if (!grams.empty()) {
+            auto events = storage_.nodes_of_kind(NodeKind::Event);
+            std::unordered_map<std::string, int> df;
+            for (auto& g : grams)
+              for (auto* n : events)
+                if (n->text.find(g) != std::string::npos) ++df[g];
+            double idf_sum = 0;
+            std::unordered_map<std::string, double> idf;
+            for (auto& g : grams) {
+              idf[g] = std::log(1.0 + (double)events.size() / (1.0 + df[g]));
+              idf_sum += idf[g];
+            }
+            for (auto* n : events) {
+              int m = 0;
+              double s = 0;
+              for (auto& g : grams)
+                if (n->text.find(g) != std::string::npos) {
+                  ++m;
+                  s += idf[g];
+                }
+              if ((m >= 2 || grams.size() == 1) && s > 0)
+                add(n->uid, 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0), "lex");
+            }
           }
         }
       }

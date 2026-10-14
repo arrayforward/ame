@@ -32,6 +32,7 @@
 #include "ame/vector/vector_service.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace ame {
 
@@ -126,7 +127,9 @@ std::string Reranker::make_explain(const Path& p) const {
 //          d. 用 fuse 按 α/β/γ 权重融合为总分；
 //          e. 组装 ScoredEvent：总分、三路子分、首条扩散路径（若有）及其解释串，入结果集；
 //   步骤3：按总分降序排序；
-//   步骤4：结果数超过 limit 则截断为前 limit 条，返回。
+//   步骤4：贪心选 Top-N——按总分从高到低取，文本与已选证据完全相同的跳过
+//         （名额让给下一名）：去重在截断前做，避免重复项占掉宝贵的召回个数；
+//         取满 limit 即止。
 std::vector<ScoredEvent> Reranker::rerank(const DiffusionResult& diff, const Vec& query_emb,
                                           const RecallFilters& filters, int limit) const {
   // 归一化图扩散分（仅以事件节点能量为基准）
@@ -160,8 +163,16 @@ std::vector<ScoredEvent> Reranker::rerank(const DiffusionResult& diff, const Vec
     out.push_back(se);
   }
   std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.score > b.score; });
-  if ((int)out.size() > limit) out.resize(limit);
-  return out;
+  // 截断前去重：同文本证据只占一个名额，跳过的名额由后续不同证据递补
+  std::vector<ScoredEvent> picked;
+  picked.reserve(std::min((size_t)limit, out.size()));
+  std::unordered_set<std::string> seen_text;
+  for (auto& se : out) {
+    if (!seen_text.insert(se.event->text).second) continue;
+    picked.push_back(se);
+    if ((int)picked.size() >= limit) break;
+  }
+  return picked;
 }
 
 }  // namespace ame

@@ -8,3 +8,5 @@ bench/config/*.local.json
 # 基准原始数据（体积大/版权，README 写明获取方式；fixtures 与蒸馏产物保留）
 bench/data/longmemeval_s_cleaned.json
 bench/data/locomo10.json
+# 本地验证构建树（winlibs 工具链）
+build-win/
