@@ -38,6 +38,9 @@ android {
         // 滑窗默认 8 条 = 4 轮对话：recall 修复后更早历史靠证据取证，窗口过长浪费 token
         buildConfigField "int", "CONTEXT_WINDOW_TURNS", "${lp.getProperty('CONTEXT_WINDOW_TURNS', '8')}"
         buildConfigField "int", "RECALL_TOP_K", "${lp.getProperty('RECALL_TOP_K', '5')}"
+        // 记忆后端开关：graph=1.x 图引擎（graph.json 快照）| lmem=2.0 分层记忆
+        // （观测 append-only 落盘，首次打开自动迁移旧 graph.json）。默认 graph。
+        buildConfigField "String", "MEM_STORE", "\"${lp.getProperty('MEM_STORE', 'graph')}\""
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++17"

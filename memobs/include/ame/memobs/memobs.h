@@ -5,7 +5,7 @@
 // 本文件思路：对外声明 Observation 数据模型与 ObsStore 存储接口。
 //           观测 append-only：append 即分配全局单调 seq 并立即落盘
 //           （per-owner 分片 shards/obs/<owner>.jsonl，JSON Lines）；
-//           打开时扫描分片恢复 next_seq；eraseOwner 物理删分片并写
+//           打开时扫描分片恢复 next_seq 并回填全部观测（重启 replay）；eraseOwner 物理删分片并写
 //           tombstone 空壳记录，eraseChannel 重写 owner 分片剔除该会话。
 //
 // 关键算法/数据结构：

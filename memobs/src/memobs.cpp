@@ -36,11 +36,13 @@ ObsStore::ObsStore(std::string root) : root_(std::move(root)) {
   restore();
 }
 
-// 伪代码：扫描分片恢复 next_seq
-//   步骤1：next_seq 置 1；遍历 shards/obs 下所有 .jsonl；
-//   步骤2：逐行 parse，seq 取 max；
+// 伪代码：扫描分片恢复内存态
+//   步骤1：清空 obs_/by_seq_，next_seq 置 1；遍历 shards/obs 下所有 .jsonl；
+//   步骤2：逐行 parse 反序列化观测，回填 owner deque 与 by_seq_，seq 取 max；
 //   步骤3：next_seq = max+1（无分片则保持 1）。
 void ObsStore::restore() {
+  obs_.clear();
+  by_seq_.clear();
   std::error_code ec;
   if (!std::filesystem::exists(shard_dir(), ec)) return;
   uint64_t max_seq = 0;
@@ -53,9 +55,11 @@ void ObsStore::restore() {
       bool ok = false;
       Json j = Json::parse(line, &ok);
       if (!ok) continue;
-      const Json* seq = j.find("seq");
-      if (seq && seq->kind == Json::Num && (uint64_t)seq->num > max_seq)
-        max_seq = (uint64_t)seq->num;
+      Observation o = from_json(j);
+      if (o.seq == 0) continue;  // 无 seq 的坏行跳过（seq 从 1 起，0 保留）
+      if (o.seq > max_seq) max_seq = o.seq;
+      by_seq_[o.seq] = o.owner;
+      obs_[o.owner].push_back(std::move(o));
     }
   }
   next_seq_ = max_seq + 1;

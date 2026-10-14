@@ -1,13 +1,14 @@
 /*
- * 所属模块：app——AME 引擎 JNI 声明类。
+ * 所属模块：app——AME 引擎 JNI 声明类（1.x graph 后端）。
  * 主体思路：静态代码块加载 libame_jni.so；全部 native 方法以 private static
  *   声明在本类中（JNI 符号名为 Java_com_ame_memory_AmeEngine_*），
  *   实例方法持句柄做薄壳封装，close() 释放原生引擎（含快照兜底落盘）。
- * 依赖关系：libame_jni（CMake 外源构建，见 ame_jni/CMakeLists.txt）。
+ * 依赖关系：libame_jni（CMake 外源构建，见 ame_jni/CMakeLists.txt）；
+ *   实现 MemEngine 接口（与 LmemEngine 双后端同形）。
  */
 package com.ame.memory;
 
-public final class AmeEngine implements AutoCloseable {
+public final class AmeEngine implements MemEngine {
 
     static {
         System.loadLibrary("ame_jni");

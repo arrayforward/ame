@@ -16,6 +16,12 @@
 // =============================================================================
 #include "ame/mem/mem.h"
 
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <sstream>
+
 namespace ame {
 
 // 伪代码：构造网关
@@ -135,6 +141,68 @@ size_t Mem::eraseChannel(const std::string& owner, const std::string& channel) {
 
 void Mem::rebuild_index() {
   index_.rebuild(obs_, facts_);
+}
+
+// ---- 1.x → 2.0 迁移工具（P1）----
+
+std::string migrate_flag_path(const std::string& lmem_root) {
+  return lmem_root + "/migrated.flag";
+}
+
+bool migrate_done(const std::string& lmem_root) {
+  std::error_code ec;
+  return std::filesystem::exists(migrate_flag_path(lmem_root), ec);
+}
+
+// 伪代码：1.x graph.json → 观测层
+//   步骤1：读文件解析（Engine 组合快照取 "graph".nodes，兼容裸图快照）；
+//   步骤2：遍历 kind==Event 的节点，空 text 跳过；attrs.speaker 映射 kind
+//         （"user"→user，其余含缺失→assistant），attrs.dia_id 进 meta；
+//   步骤3：先扫同 owner+channel 已有观测建 (kind,ts,text) 去重集，命中跳过——
+//         迁移中断重启重做时不重复（观测 seq 单调，无法靠 seq 判重）；
+//   步骤4：remember 逐条入观测层（append-only 立即落盘），统计写入数返回。
+size_t migrate_graph(Mem& mem, const std::string& graph_json_path,
+                     const std::string& owner, const std::string& channel) {
+  std::ifstream f(graph_json_path, std::ios::binary);
+  if (!f) return 0;
+  std::stringstream ss;
+  ss << f.rdbuf();
+  bool ok = false;
+  const Json root = Json::parse(ss.str(), &ok);
+  if (!ok) return 0;
+  const Json* nodes = nullptr;
+  if (const Json* g = root.find("graph")) nodes = g->find("nodes");
+  if (!nodes) nodes = root.find("nodes");  // 兼容裸图快照
+  if (!nodes || nodes->kind != Json::Arr) return 0;
+
+  const std::string sep = "\x1f";  // 字段分隔（控制字符，文本不会含）
+  std::set<std::string> seen;
+  mem.obs_store().for_channel(owner, channel, [&](const Observation& o) {
+    seen.insert(o.kind + sep + std::to_string(o.ts) + sep + o.text);
+  });
+
+  size_t n = 0;
+  for (const Json& j : nodes->arr) {
+    if ((int)(j.find("kind") ? j.find("kind")->as_num(-1) : -1) != (int)NodeKind::Event)
+      continue;
+    const std::string text = j.find("text") ? j.find("text")->as_str() : "";
+    if (text.empty()) continue;
+    const int64_t ts = (int64_t)(j.find("ts") ? j.find("ts")->as_num() : 0);
+    std::string dia_id;
+    if (const Json* a = j.find("attrs"))
+      if (const Json* d = a->find("dia_id")) dia_id = d->as_str();
+    const std::string kind =
+        (j.find("attrs") && j.find("attrs")->find("speaker") &&
+         j.find("attrs")->find("speaker")->as_str() == "user")
+            ? "user"
+            : "assistant";
+    const std::string key = kind + sep + std::to_string(ts) + sep + text;
+    if (!seen.insert(key).second) continue;
+    Json meta = Json::object();
+    if (!dia_id.empty()) meta.set("dia_id", Json::string(dia_id));
+    if (mem.remember(owner, channel, kind, text, ts, std::move(meta)).code == Err::Ok) ++n;
+  }
+  return n;
 }
 
 }  // namespace ame

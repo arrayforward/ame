@@ -16,7 +16,8 @@
  *   经 recall 取证）；记忆机制与普通对话完全一致（每 session 独立、删即清）。
  * 关键数据结构：token 估算口径——CJK 字符 1 字≈1 token、ASCII 4 字符≈1 token、
  *   图片按定值 1500 token/张（最长边≤1024 JPEG 的经验口径，注释于估算函数）。
- * 依赖关系：AmeEngine（JNI）、MiniMaxClient、SessionStore、BuildConfig（可调上限）。
+ * 依赖关系：MemEngine（JNI，graph/lmem 双后端同形）、MiniMaxClient、SessionStore、
+ *   BuildConfig（可调上限）。
  */
 package com.ame.memory;
 
@@ -50,7 +51,7 @@ public class MemoryOrchestrator {
     /** 联网搜索结果注入字符上限（截断防超长结果撑爆单轮上下文） */
     public static final int SEARCH_MAX_CHARS = 2000;
 
-    private final AmeEngine engine;
+    private final MemEngine engine;
     private final SessionStore store;
     private final String sessionId;
     private final int windowSize;    // 滑窗轮数（可调）
@@ -98,14 +99,14 @@ public class MemoryOrchestrator {
     private final ArrayDeque<TurnDiag> diagLog = new ArrayDeque<>();
 
     /** 短构造：普通对话模式（窗口/证据数取 BuildConfig 默认值，无导游参数） */
-    public MemoryOrchestrator(AmeEngine engine, SessionStore store, String sessionId) {
+    public MemoryOrchestrator(MemEngine engine, SessionStore store, String sessionId) {
         this(engine, store, sessionId,
                 BuildConfig.CONTEXT_WINDOW_TURNS, BuildConfig.RECALL_TOP_K,
                 null, null);
     }
 
     /** 全参构造（Kotlin 默认参数的等价展开：短构造 + 本全参构造） */
-    public MemoryOrchestrator(AmeEngine engine, SessionStore store, String sessionId,
+    public MemoryOrchestrator(MemEngine engine, SessionStore store, String sessionId,
                               int windowSize, int recallLimit,
                               String guideTitle, String guideText) {
         this.engine = engine;

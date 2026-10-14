@@ -92,4 +92,18 @@ class Mem {
   View view_;
 };
 
+// ---- 1.x → 2.0 迁移工具（P1，设计 §10 P1）----
+// 迁移标记文件（lmem 根目录下）：存在 = 该 session 的 1.x 快照已迁过，防重复。
+// 路径约定集中在 mem 模块，JNI 与单测共用同一判据。
+std::string migrate_flag_path(const std::string& lmem_root);
+bool migrate_done(const std::string& lmem_root);
+
+// migrate_graph：把 1.x graph.json（Engine 组合快照或裸图快照）中每个 Event 节点
+// 转成观测写入观测层：kind 由 attrs.speaker 映射（"user"→user，其余→assistant），
+// text 进原文，attrs.dia_id 进观测 meta，channel 统一为传入会话；text 为空跳过。
+// 幂等：同 owner+channel 下按 (kind,ts,text) 去重，迁移中断（标记未写）重启重做
+// 不会重复。返回本次写入的观测数（0 = 无快照/解析失败/已全部迁过）。
+size_t migrate_graph(Mem& mem, const std::string& graph_json_path,
+                     const std::string& owner, const std::string& channel);
+
 }  // namespace ame

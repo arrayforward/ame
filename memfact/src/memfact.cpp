@@ -88,6 +88,8 @@ FactStore::FactStore(std::string root) : root_(std::move(root)) {
 
 // 伪代码：扫描分片恢复 next_seq（同 ObsStore）
 void FactStore::restore() {
+  facts_.clear();
+  by_seq_.clear();
   std::error_code ec;
   if (!std::filesystem::exists(shard_dir(), ec)) return;
   uint64_t max_seq = 0;
@@ -100,9 +102,11 @@ void FactStore::restore() {
       bool ok = false;
       Json j = Json::parse(line, &ok);
       if (!ok) continue;
-      const Json* seq = j.find("seq");
-      if (seq && seq->kind == Json::Num && (uint64_t)seq->num > max_seq)
-        max_seq = (uint64_t)seq->num;
+      Fact fa = from_json(j);
+      if (fa.seq == 0) continue;  // 无 seq 的坏行跳过（seq 从 1 起，0 保留）
+      if (fa.seq > max_seq) max_seq = fa.seq;
+      by_seq_[fa.seq] = fa.owner;
+      facts_[fa.owner].push_back(std::move(fa));
     }
   }
   next_seq_ = max_seq + 1;

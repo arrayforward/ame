@@ -56,7 +56,7 @@ public class ChatActivity extends AppCompatActivity {
     public static final String EXTRA_SESSION_NAME = "session_name";
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private AmeEngine engine;
+    private MemEngine engine;
     private MemoryOrchestrator orchestrator;
     private SessionStore store;
     private String sessionId;
@@ -102,9 +102,12 @@ public class ChatActivity extends AppCompatActivity {
         // 蓝方修复：引擎创建（加载 graph.json 快照）+ 词典载入移出 UI 线程——
         // 大图快照同步解析曾导致进页面卡死；就绪前发送/诊断 gated
         io.execute(() -> {
-            AmeEngine eng = AmeEngine.create(
-                    store.sessionDir(sessionId).getAbsolutePath());
-            KeywordDict.ensureLoaded(this, eng);
+            // 双后端：MEM_STORE=lmem 走 2.0 分层记忆（自动迁移 1.x 快照），默认 graph
+            String dir = store.sessionDir(sessionId).getAbsolutePath();
+            MemEngine eng = "lmem".equals(BuildConfig.MEM_STORE)
+                    ? LmemEngine.create(dir, sessionId)
+                    : AmeEngine.create(dir);
+            if (eng instanceof AmeEngine) KeywordDict.ensureLoaded(this, (AmeEngine) eng);
             runOnUiThread(() -> {
                 engine = eng;
                 orchestrator = new MemoryOrchestrator(eng, store, sessionId);
