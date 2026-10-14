@@ -261,18 +261,20 @@ user 1.0、assistant 0.7、vision 0.9、search 0.6。
    - **时间盒：抽样套件端到端 ≤ 60 分钟**（标准开发机，含摄入 + 召回 + 本地打分；
      LLM 答题/判分走既有磁盘缓存，缓存冷启动另行计时并在报告标注）。超时即停线
      优化（缩题单/修缓存），不许默默扩大时间预算；每次抽样跑在报告记录实际耗时；
-   - **里程碑验收**：P0/P1 等节点跑全量（LoCoMo 全量、LME 全量 500），抽样集
-     与全量结果一并入 `docs/reports/`；
+   - **里程碑与迭代同用抽样集**：P0–P4 各节点验收跑同一抽样套件（不单独扩大），
+     通过即过节点；
+   - **仅最终发布跑全量**（LoCoMo 全量、LME 全量 500），全量结果与抽样集结果
+     一并入 `docs/reports/` 作为发布口径；
 6. **D6 纪律**：每个合入的指标数字必须能从发布产物（commit + 固定种子 +
    缓存）一键重生成，报告记录命令与 commit。
 
 | 里程碑 | 内容 | 验收（全部自动化 + bench 回归） |
 |---|---|---|
-| **P0** | M15 观测层 + M16 事实层(fold/corrects/半衰期) + M17 索引(倒排/replay) + M18 视图(打包/去重/可靠性排序) + owner 分片 + erase + C++ 单测 | ①单元六项（erase 无残留/fold/corrects/半衰期/replay 逐比特/视图打包）；⑦**三夹具 + LoCoMo sample 复跑：evidence_dia_ids 覆盖率 ≥ 1.x 同配置，judge 分不降**（入 `docs/reports/`） |
-| P1 | 外观层 `mem` 网关 + `--store lmem` 切换 + JNI/App 接线 + 1.x→观测层迁移工具 | 全量 LoCoMo/LME 双后端对比表；旧数据迁移后抽样 recall 一致 |
-| P2 | declare 重认领 + 来源可靠性闭环 + LLM 提取插件 + G1–G3 校验门 | 同名实体少计修复的 A/B；纠错反馈排序影响的可测实验；LME 偏好类题型不回归 |
-| P3 | 联想扩散三路召回 + 多分辨率时间桶 | 多跳/时序题（LoCoMo cat2 那 12 题）judge 不低于 1.x 修复后口径（11/12） |
-| P4 | 学习（轮边界梯度对齐监督，按 owner 隔离） | fold 权重学习跨 owner 零泄漏（单测）+ 不劣化基线的 bench 证据 |
+| **P0** | M15 观测层 + M16 事实层(fold/corrects/半衰期) + M17 索引(倒排/replay) + M18 视图(打包/去重/可靠性排序) + owner 分片 + erase + C++ 单测 | ①单元六项（erase 无残留/fold/corrects/半衰期/replay 逐比特/视图打包）；②**抽样套件 bench 回归：evidence_dia_ids 覆盖率 ≥ 1.x 同配置，judge 分不降，耗时 ≤60min**（入 `docs/reports/`） |
+| P1 | 外观层 `mem` 网关 + `--store lmem` 切换 + JNI/App 接线 + 1.x→观测层迁移工具 | 抽样套件双后端对比表（同题单同缓存）；旧数据迁移后抽样 recall 一致 |
+| P2 | declare 重认领 + 来源可靠性闭环 + LLM 提取插件 + G1–G3 校验门 | 同名实体少计修复的抽样 A/B；纠错反馈排序影响可测；抽样集 LME 偏好类题型不回归 |
+| P3 | 联想扩散三路召回 + 多分辨率时间桶 | 抽样集中多跳/时序题（LoCoMo cat2 那 12 题）judge 不低于 1.x 修复后口径（11/12） |
+| P4 | 学习（轮边界梯度对齐监督，按 owner 隔离） | fold 权重学习跨 owner 零泄漏（单测）+ 抽样集不劣化 1.x 基线 |
 
 **与 1.x 并存约定**：`seed/diffusion/rerank/...` 不动；新模块 `memobs/memfact/
 memindex/memview/mem`（M15–M19）仅依赖 `core`；bench 经 `--store` 开关双跑，
