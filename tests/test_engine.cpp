@@ -50,8 +50,23 @@ static void test_gateway_verbs() {
   CHECK(card.uid == b);
 }
 
+// 引擎统计接口：turns/events=事件数、total_chars=事件文本字符合计、nodes=图节点总数
+static void test_engine_stats() {
+  Engine e;
+  auto s0 = e.stats();
+  CHECK(s0.turns == 0 && s0.events == 0 && s0.total_chars == 0 && s0.nodes == 0);
+  e.remember_turn("user", "我今天去爬山了", 1700000000, "D1:1", "s1");
+  e.remember_turn("assistant", "天气不错吧", 1700000060, "D1:2", "s1");
+  auto s1 = e.stats();
+  CHECK(s1.turns == 2 && s1.events == 2);
+  CHECK(s1.total_chars == (long)(std::string("我今天去爬山了").size() +
+                                 std::string("天气不错吧").size()));
+  CHECK(s1.nodes > 2);  // 事件 + speaker 实体 + 关键词节点
+}
+
 int main() {
   test_lookup();
   test_gateway_verbs();
+  test_engine_stats();
   return AME_TEST_REPORT();
 }

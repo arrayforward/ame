@@ -349,7 +349,7 @@ int main(int argc, char** argv) {
         AggJob job{(int)(pendings.size()), {}};
         for (int j = 0; j < kept; ++j) {
           const Node* n = cands.events[j].event;
-          char dbuf[24] = "";
+          char dbuf[32] = "";
           std::time_t t = (std::time_t)n->ts;
           std::tm tm{};
           gmtime_r(&t, &tm);

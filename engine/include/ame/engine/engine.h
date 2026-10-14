@@ -121,6 +121,28 @@ class Engine {
     return entity_.get_profile(uid);
   }
 
+  // 引擎统计（上下文外置可视化用，Android 状态栏数据通路）：
+  //   turns   = 事件节点数（每轮 remember_turn 产 1 事件）；
+  //   total_chars = 全部事件文本字符数（token 估算口径 chars/4 在调用侧做）；
+  //   events  = 事件节点数（同 turns，语义别名便于 JSON 直出）；
+  //   nodes   = 图节点总数（事件+实体+关键词等）。
+  struct EngineStats {
+    long turns = 0;
+    long total_chars = 0;
+    long events = 0;
+    long nodes = 0;
+  };
+  EngineStats stats() const {
+    EngineStats s;
+    s.nodes = (long)storage_.node_count();
+    for (auto* n : storage_.nodes_of_kind(NodeKind::Event)) {
+      ++s.events;
+      ++s.turns;
+      s.total_chars += (long)n->text.size();
+    }
+    return s;
+  }
+
   // 反馈（M11）
   Err feedback(long query_id, SignalType signal, const std::string& target_uid = "",
                const std::string& note = "");
