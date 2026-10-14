@@ -47,6 +47,9 @@ public class MemoryOrchestrator {
     /** 诊断 tab 保留的最近轮数 */
     public static final int DIAG_MAX = 30;
 
+    /** 联网搜索结果注入字符上限（截断防超长结果撑爆单轮上下文） */
+    public static final int SEARCH_MAX_CHARS = 2000;
+
     private final AmeEngine engine;
     private final SessionStore store;
     private final String sessionId;
@@ -70,17 +73,19 @@ public class MemoryOrchestrator {
         public final List<String> evidence;           // recall 证据（带时间戳，与注入一致）
         public final List<MiniMaxClient.Msg> messages;  // 实际提交的 messages（含滑窗）
         public final boolean webSearch;               // 本轮是否开联网
+        public final String searchText;               // 第 1 轮联网检索内容；null = 未联网/失败
         public final int sentTokens;
         public final long ts;
 
         TurnDiag(String query, String system, List<String> evidence,
-                 List<MiniMaxClient.Msg> messages, boolean webSearch,
+                 List<MiniMaxClient.Msg> messages, boolean webSearch, String searchText,
                  int sentTokens, long ts) {
             this.query = query;
             this.system = system;
             this.evidence = evidence;
             this.messages = messages;
             this.webSearch = webSearch;
+            this.searchText = searchText;
             this.sentTokens = sentTokens;
             this.ts = ts;
         }
@@ -130,8 +135,10 @@ public class MemoryOrchestrator {
      *  记忆写入模式：一轮一条——"提问 → 回答"合成单个事件一次写入（rememberTurn
      *  每轮只调一次），提问永远不单独成图，避免模板问题互相命中挤占召回名额；
      *  写入在作答成功后进行（失败轮不落记忆，与 jsonl 一致）。
-     *  webSearch=true 时本轮走 MiniMax 托管 web_search 联网作答（单次请求内搜索+作答，
-     *  整轮结果照常写入记忆，之后可被 recall 召回）；带图轮自动降级为普通作答。 */
+     *  webSearch=true 时两轮流程：第一轮 web_search 只查内容（不落记忆），第二轮
+     *  M3 本地非联网作答——system prompt 同时携带"联网搜索结果 + recall 记忆证据 +
+     *  提问"；只有第二轮的整轮问答写入记忆（一轮一条，失败轮不落）。带图时先用
+     *  M3 vision 解析图片并入搜索查询。搜索失败降级为不联网直接作答。 */
     public String chat(String userText, String imageB64, String imagePath,
                        boolean webSearch) {
         long now = System.currentTimeMillis() / 1000;
@@ -153,13 +160,35 @@ public class MemoryOrchestrator {
         }
         Log.d(TAG, "[" + sessionId + "] 记忆文本: " + take(memoryText, 120));
 
-        // 装配（含 recall 取证）——当前问题不入图，也不占证据位
+        // 联网流程第 1 轮：只查内容，不写入记忆（搜索结果时效性强，入库会污染召回）
+        String searchText = null;
+        if (webSearch) {
+            try {
+                String q = userText.trim().isEmpty() ? memoryText : userText;
+                if (imageB64 != null) {
+                    String desc = MiniMaxClient.visionForSearch(imageB64);
+                    if (!desc.isEmpty()) {
+                        q = userText.trim().isEmpty()
+                                ? "图片内容：" + desc
+                                : q + "\n（附图内容：" + desc + "）";
+                    }
+                    Log.d(TAG, "[" + sessionId + "] 联网+带图：M3 vision 解析并入查询");
+                }
+                searchText = MiniMaxClient.webSearch(q);
+                Log.d(TAG, "[" + sessionId + "] 联网检索完成 " + searchText.length() + "字");
+            } catch (Exception e) {
+                Log.e(TAG, "[" + sessionId + "] 联网搜索失败，降级为不联网作答", e);
+                searchText = null;
+            }
+        }
+
+        // 装配（含 recall 取证 + 联网搜索结果注入）——当前问题不入图，也不占证据位
         String query = userText.trim().isEmpty() ? memoryText : userText;   // ifBlank
         List<MiniMaxClient.Msg> msgs = assemble(query, history, userText, imageB64,
-                webSearch);
+                webSearch, searchText);
 
-        // MiniMax 整段作答；开联网时单次请求内完成"搜索+作答"（带图轮自动降级）
-        String reply = MiniMaxClient.chat(msgs, 2048, webSearch);
+        // 第 2 轮：M3 本地非联网作答（搜索结果+提问+记忆均在 system/窗口中）
+        String reply = MiniMaxClient.chat(msgs);
         Log.d(TAG, "[" + sessionId + "] 回复 " + reply.length() + "字: "
                 + take(reply.replace('\n', ' '), 100));   // take(100)
 
@@ -174,12 +203,12 @@ public class MemoryOrchestrator {
         return reply;
     }
 
-    // assemble 伪代码：system（人设+档案+recall 证据）+ 滑窗轮次（图片轮只带记忆文本）
-    //   + 当前用户轮（带图则多模态）；同时估算本轮发送 token 并记录 lastSentTokens。
-    //   顺带产出 TurnDiag 快照（system 全文/证据列表/提交消息/搜索结果）供诊断 tab。
+    // assemble 伪代码：system（人设+档案+recall 证据[+联网搜索结果]）+ 滑窗轮次
+    //   （图片轮只带记忆文本）+ 当前用户轮（带图则多模态）；同时估算本轮发送 token
+    //   并记录 lastSentTokens。顺带产出 TurnDiag 快照供诊断 tab。
     private List<MiniMaxClient.Msg> assemble(String query, List<Message> history,
                                              String userText, String imageB64,
-                                             boolean webSearch) {
+                                             boolean webSearch, String searchText) {
         // takeLast(windowSize)：取历史末尾至多 windowSize 条
         int from = Math.max(0, history.size() - windowSize);
         List<Message> window = history.subList(from, history.size());
@@ -194,6 +223,18 @@ public class MemoryOrchestrator {
         }
         String system = pr.system;
         List<String> evidence = pr.evidence;
+
+        // 联网搜索结果注入 system（仅本轮生效，不落记忆——时效内容入库会污染召回；
+        // 截断到 SEARCH_MAX_CHARS，防超长搜索结果撑爆单轮上下文）
+        if (searchText != null && !searchText.isEmpty()) {
+            if (searchText.length() > SEARCH_MAX_CHARS) {
+                Log.d(TAG, "[" + sessionId + "] 联网结果截断 " + searchText.length()
+                        + "→" + SEARCH_MAX_CHARS + "字");
+                searchText = searchText.substring(0, SEARCH_MAX_CHARS)
+                        + "\n……（搜索结果过长已截断）";
+            }
+            system = system + "\n\n联网搜索结果（实时检索，供本轮作答参考）：\n" + searchText;
+        }
 
         List<MiniMaxClient.Msg> msgs = new ArrayList<>();
         msgs.add(new MiniMaxClient.Msg("system", system));
@@ -216,9 +257,10 @@ public class MemoryOrchestrator {
 
         Log.d(TAG, "[" + sessionId + "] 装配完成: system=" + system.length() + "字 "
                 + "滑窗=" + window.size() + "条 messages=" + msgs.size() + "条 "
+                + (searchText != null ? "联网结果=" + searchText.length() + "字 " : "")
                 + "~" + lastSentTokens + "tok");
         diagLog.addLast(new TurnDiag(query, system, evidence,
-                new ArrayList<>(msgs), webSearch,
+                new ArrayList<>(msgs), webSearch, searchText,
                 lastSentTokens, System.currentTimeMillis()));
         while (diagLog.size() > DIAG_MAX) diagLog.removeFirst();
         return msgs;

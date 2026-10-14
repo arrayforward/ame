@@ -84,7 +84,7 @@ public class DiagAdapter extends RecyclerView.Adapter<DiagAdapter.VH> {
         addCard(ctx, col,
                 kv("查询词", d.query) + "\n" +
                 kv("时间", fmt.format(new Date(d.ts))) + "\n" +
-                kv("联网搜索", d.webSearch ? "开（M3 单次请求搜索+作答）" : "关") + "\n" +
+                kv("联网搜索", d.webSearch ? "开（第1轮检索→第2轮 M3 综合作答）" : "关") + "\n" +
                 kv("发送估算", "~" + d.sentTokens + " tok") + "\n" +
                 kv("记忆证据", d.evidence.size() + " 条") + "\n" +
                 kv("提交消息", d.messages.size() + " 条（含 system）"));
@@ -101,6 +101,12 @@ public class DiagAdapter extends RecyclerView.Adapter<DiagAdapter.VH> {
                 ev.append("证据 ").append(i + 1).append("｜").append(d.evidence.get(i));
             }
             addCard(ctx, col, ev.toString());
+        }
+
+        // ② 联网搜索结果（第 1 轮检索，仅本轮注入，不落记忆）
+        if (d.searchText != null && !d.searchText.isEmpty()) {
+            addSectionTitle(ctx, col, "联网搜索结果（第 1 轮检索，未入记忆）");
+            addCard(ctx, col, d.searchText);
         }
 
         // ③ System Prompt 全文

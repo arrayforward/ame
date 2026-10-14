@@ -70,36 +70,6 @@ public final class MiniMaxClient {
 
     /** 整段对话补全（可指定 maxTokens）；失败抛异常（含 HTTP 码），由调用方展示 */
     public static String chat(List<Msg> messages, int maxTokens) {
-        return chat(messages, maxTokens, false);
-    }
-
-    /** 整段对话补全；webSearch=true 时走 MiniMax 托管 web_search 联网作答
-     *  （/v1/responses，单次请求内搜索+作答）。带图轮：Responses 协议不支持图片
-     *  输入，先用 M3 vision 把图片解析成文本拼进查询，再走联网搜索。 */
-    public static String chat(List<Msg> messages, int maxTokens, boolean webSearch) {
-        if (webSearch) {
-            List<Msg> adjusted = messages;
-            boolean hasImage = false;
-            for (Msg m : messages) if (m.imageB64 != null) hasImage = true;
-            if (hasImage) {
-                // 带图轮 + 联网：M3 vision 解析图片 → 文本并入查询 → 联网搜索
-                adjusted = new ArrayList<>(messages.size());
-                for (Msg m : messages) {
-                    if (m.imageB64 == null) {
-                        adjusted.add(m);
-                        continue;
-                    }
-                    String desc = visionCaption(m.imageB64, VISION_SEARCH_PROMPT);
-                    if (desc.isEmpty()) desc = "（图片描述失败）";
-                    String combined = m.text.trim().isEmpty()
-                            ? "图片内容：" + desc
-                            : m.text + "\n（附图内容：" + desc + "）";
-                    adjusted.add(new Msg(m.role, combined));
-                }
-                Log.d(TAG, "联网+带图：已用 M3 vision 解析图片并入搜索查询");
-            }
-            return chatWithWebSearch(adjusted);
-        }
         String body;
         try {
             JSONArray arr = new JSONArray();
@@ -187,26 +157,25 @@ public final class MiniMaxClient {
         }
     }
 
-    /** 联网作答（MiniMax Server Tool web_search）：走 OpenAI Responses API
+    /** 供联网搜索用的图片解析（详细描述关键信息，便于搜索命中）；失败返回空串 */
+    public static String visionForSearch(String imageB64) {
+        return visionCaption(imageB64, VISION_SEARCH_PROMPT);
+    }
+
+    /** 联网检索查询内容（MiniMax Server Tool web_search）：走 OpenAI Responses API
      *  （{BASE_URL}/responses），声明 tools=[{"type":"web_search"}] 后服务端单次请求内
-     *  完成"搜索+基于结果作答"，读顶层 output_text 得最终答案（含引用来源）。
-     *  注意：只发"搜索 system + 当前问题"——带完整历史时，历史里助手曾说过的
-     *  "我没有联网"等陈旧结论会带偏模型，使其放弃调用搜索工具直接凭记忆作答
-     *  （实测复现）。记忆连续性由整轮写记忆保证，不靠搜索请求携带历史。
-     *  input 为完整 messages 数组（调用方已把图片解析成文本并入）；失败抛异常。 */
-    private static String chatWithWebSearch(List<Msg> messages) {
-        // 取最后一条 user 消息作为搜索查询（带图轮已被调用方转成文本）
-        String query = null;
-        for (Msg m : messages) {
-            if ("user".equals(m.role)) query = m.text;
-        }
-        if (query == null) throw new RuntimeException("webSearch 无 user 消息");
+     *  完成"搜索+基于结果作答"，读顶层 output_text 作为查询内容（含引用来源）。
+     *  注意：只发"搜索 system + 查询"——带对话历史时，历史里助手曾说过的陈旧结论
+     *  会带偏模型使其放弃调用搜索工具（实测复现）。本方法只负责"查内容"，综合
+     *  提问与记忆作答是调用方的第二次 M3 调用。 */
+    public static String webSearch(String query) {
         String body;
         try {
             JSONArray arr = new JSONArray()
                     .put(new JSONObject().put("role", "system").put("content",
                             "你是联网搜索助手：必须调用 web_search 工具检索最新信息，"
-                                    + "再基于搜索结果作答，回答中注明信息来源。"))
+                                    + "再基于搜索结果简洁作答，回答中注明信息来源，"
+                                    + "严格控制在 100 字以内。"))
                     .put(new JSONObject().put("role", "user").put("content", query));
             body = new JSONObject()
                     .put("model", BuildConfig.MINIMAX_MODEL)
@@ -267,7 +236,7 @@ public final class MiniMaxClient {
             }
             if (out.isEmpty()) throw new RuntimeException("webSearch 响应无 output_text");
             Log.d(TAG, "webSearch 200: model=" + BuildConfig.MINIMAX_MODEL
-                    + " 答案" + out.length() + "字");
+                    + " 结果" + out.length() + "字");
             return stripThink(out);
         } catch (IOException e) {
             throw new RuntimeException(e);
