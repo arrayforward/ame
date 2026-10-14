@@ -255,6 +255,9 @@ public class ChatActivity extends AppCompatActivity {
     // refreshStatus 伪代码：引擎统计（累计轮数/字符数/节点数）+ 上轮发送 token →
     //   状态栏对比行："记忆 N轮 ~Xtok │ 发送 Ytok │ 压缩 Z× │ 节点 M │ 窗口z+证据k"。
     private void refreshStatus() {
+        // 蓝方修复：页面销毁后 io 已 shutdown，网络回调晚到再 execute 会
+        // RejectedExecutionException 崩主线程——销毁后直接跳过状态栏刷新
+        if (io.isShutdown()) return;
         io.execute(() -> {
             try {
                 JSONObject s = new JSONObject(orchestrator.statsJson());
