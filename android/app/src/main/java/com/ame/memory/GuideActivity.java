@@ -71,21 +71,12 @@ public class GuideActivity extends AppCompatActivity {
     private TextView tvStatus;
     private final List<Message> msgs = new ArrayList<>();
 
-    // 待发送图片（压缩后文件 + base64）；null = 纯文本轮
-    // （Kotlin Pair<File, String> 的等价小持有类）
-    private static final class Pending {
-        final File file;
-        final String b64;
-
-        Pending(File file, String b64) {
-            this.file = file;
-            this.b64 = b64;
-        }
-    }
-
-    private Pending pendingImage;
+    // 待发送图片（仅内存 base64，不落盘——记忆只存 vision 摘要文本）；null = 纯文本轮
+    private String pendingImageB64;
     private Uri cameraOut;
+    private File cameraFile;   // 拍照临时落点（cacheDir，用完即删）
     private boolean webOn;   // 联网开关：开=本轮先 web_search 取证入记忆再作答
+    private volatile boolean ready = false;  // 引擎+词典异步初始化完成标志
 
     private final ActivityResultLauncher<PickVisualMediaRequest> pickImage =
             registerForActivityResult(new ActivityResultContracts.PickVisualMedia(),
@@ -112,10 +103,8 @@ public class GuideActivity extends AppCompatActivity {
 
         store = new SessionStore(getFilesDir());
         sessionDir = store.sessionDir(sessionId);
-        AmeEngine eng = AmeEngine.create(sessionDir.getAbsolutePath());
-        engine = eng;
-        // 关键词词典全局加载（同 io 单线程内先于任何发送执行）
-        io.execute(() -> KeywordDict.ensureLoaded(this, eng));
+        // 蓝方修复：引擎创建（加载 graph.json 快照）+ 词典载入移出 UI 线程——
+        // 大图快照同步解析曾导致进页面卡死；就绪前发送/诊断 gated
         // 导览方案：全文注入 prompt（截断由 MemoryOrchestrator 控制）；无方案文件则退化为普通记忆对话
         String guideText = null;
         File guideFile = new File(sessionDir, "guide.txt");
@@ -130,9 +119,22 @@ public class GuideActivity extends AppCompatActivity {
             Toast.makeText(this, "未找到导览方案文件，按普通对话模式运行",
                     Toast.LENGTH_LONG).show();
         }
-        orchestrator = new MemoryOrchestrator(eng, store, sessionId,
-                BuildConfig.CONTEXT_WINDOW_TURNS, BuildConfig.RECALL_TOP_K,
-                sessionName, guideText);
+        final String guideTextF = guideText;
+        final String sessionNameF = sessionName;   // lambda 捕获需 effectively final
+        io.execute(() -> {
+            AmeEngine eng = AmeEngine.create(sessionDir.getAbsolutePath());
+            KeywordDict.ensureLoaded(this, eng);
+            runOnUiThread(() -> {
+                engine = eng;
+                orchestrator = new MemoryOrchestrator(eng, store, sessionId,
+                        BuildConfig.CONTEXT_WINDOW_TURNS, BuildConfig.RECALL_TOP_K,
+                        sessionNameF, guideTextF);
+                diagAdapter = new DiagAdapter(orchestrator.diag());
+                ((RecyclerView) findViewById(R.id.rvDiag)).setAdapter(diagAdapter);
+                ready = true;
+                refreshStatus();
+            });
+        });
 
         setTitle("导游 · " + sessionName);
         tvStatus = findViewById(R.id.tvStatus);
@@ -157,10 +159,10 @@ public class GuideActivity extends AppCompatActivity {
                         .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly.INSTANCE)
                         .build()));
         findViewById(R.id.btnCamera).setOnClickListener(v -> {
-            File dir = new File(getFilesDir(), "images");
-            dir.mkdirs();
-            File f = new File(dir, "cam_" + System.currentTimeMillis() + ".jpg");
+            // 相机合约必须有落点：放 cacheDir 临时文件，stageImage 用完即删（不落盘原则）
+            File f = new File(getCacheDir(), "cam_" + System.currentTimeMillis() + ".jpg");
             Uri uri = FileProvider.getUriForFile(this, "com.ame.memory.fileprovider", f);
+            cameraFile = f;
             cameraOut = uri;
             takePicture.launch(uri);
         });
@@ -173,28 +175,36 @@ public class GuideActivity extends AppCompatActivity {
         // 诊断/消息列表切换
         findViewById(R.id.btnDiag).setOnClickListener(v -> toggleDiag());
         findViewById(R.id.btnSend).setOnClickListener(v -> {
+            if (!ready) {   // 引擎/词典异步初始化未完成
+                Toast.makeText(this, "记忆加载中，请稍候…", Toast.LENGTH_SHORT).show();
+                return;
+            }
             String text = et.getText().toString().trim();
-            Pending img = pendingImage;
-            if (text.isEmpty() && img == null) return;   // return@setOnClickListener 等价
+            String imgB64 = pendingImageB64;
+            if (text.isEmpty() && imgB64 == null) return;   // return@setOnClickListener 等价
             et.getText().clear();
             clearPending();
             appendLocal(new Message("user", text.isEmpty() ? "[图片]" : text,   // ifBlank
-                    System.currentTimeMillis() / 1000,
-                    img != null ? img.file.getAbsolutePath() : null));
+                    System.currentTimeMillis() / 1000, null));
             Log.d(MemoryOrchestrator.TAG, "[" + sessionId + "] 发送: text="
-                    + take(text, 60) + " 带图=" + (img != null));
+                    + take(text, 60) + " 带图=" + (imgB64 != null));
+            // 思考中占位（非流式作答的及时反馈），回复到达后原位替换
+            final int pendingIdx = msgs.size();
+            appendLocal(new Message("assistant", "思考中…", 0, null));
             io.execute(() -> {
                 try {
-                    String reply = orchestrator.chat(text,
-                            img != null ? img.b64 : null,
-                            img != null ? img.file.getAbsolutePath() : null, webOn);
+                    String reply = orchestrator.chat(text, imgB64, null, webOn);
                     runOnUiThread(() -> {
+                        msgs.remove(pendingIdx);
+                        adapter.notifyItemRemoved(pendingIdx);
                         appendLocal(new Message("assistant", reply, 0, null));
                         refreshStatus();
                     });
                 } catch (Exception e) {
                     Log.e(MemoryOrchestrator.TAG, "[" + sessionId + "] 请求失败", e);
                     runOnUiThread(() -> {
+                        msgs.remove(pendingIdx);
+                        adapter.notifyItemRemoved(pendingIdx);
                         Toast.makeText(GuideActivity.this, "请求失败: " + e.getMessage(),
                                 Toast.LENGTH_LONG).show();
                         refreshStatus();
@@ -202,7 +212,6 @@ public class GuideActivity extends AppCompatActivity {
                 }
             });
         });
-        refreshStatus();
     }
 
     // showPlanDialog：ScrollView（方案全文 + 方案图片纵向排列）；图片上限 PLAN_DIALOG_MAX_IMGS 张。
@@ -261,6 +270,10 @@ public class GuideActivity extends AppCompatActivity {
 
     // toggleDiag：消息列表 ↔ 诊断列表切换；进入诊断时刷新快照列表。
     private void toggleDiag() {
+        if (!ready) {
+            Toast.makeText(this, "记忆加载中，请稍候…", Toast.LENGTH_SHORT).show();
+            return;
+        }
         diagMode = !diagMode;
         findViewById(R.id.rvMessages).setVisibility(
                 diagMode ? View.GONE : View.VISIBLE);
@@ -303,11 +316,7 @@ public class GuideActivity extends AppCompatActivity {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             bmp.compress(Bitmap.CompressFormat.JPEG, 80, bos);
             byte[] bytes = bos.toByteArray();
-            File dir = new File(getFilesDir(), "images");
-            dir.mkdirs();
-            File f = new File(dir, "img_" + System.currentTimeMillis() + ".jpg");
-            Files.write(f.toPath(), bytes);
-            pendingImage = new Pending(f, Base64.encodeToString(bytes, Base64.NO_WRAP));
+            pendingImageB64 = Base64.encodeToString(bytes, Base64.NO_WRAP);
             ((ImageView) findViewById(R.id.ivPending)).setImageBitmap(bmp);
             findViewById(R.id.rowPending).setVisibility(View.VISIBLE);
         } catch (Exception e) {
@@ -316,7 +325,12 @@ public class GuideActivity extends AppCompatActivity {
     }
 
     private void clearPending() {
-        pendingImage = null;
+        pendingImageB64 = null;
+        // 拍照临时文件用完即删（图片不落盘原则的唯一例外：相机合约必须有落点）
+        if (cameraFile != null) {
+            if (cameraFile.exists()) cameraFile.delete();
+            cameraFile = null;
+        }
         findViewById(R.id.rowPending).setVisibility(View.GONE);
     }
 
@@ -330,7 +344,7 @@ public class GuideActivity extends AppCompatActivity {
     private void refreshStatus() {
         // 蓝方修复：页面销毁后 io 已 shutdown，网络回调晚到再 execute 会
         // RejectedExecutionException 崩主线程——销毁后直接跳过状态栏刷新
-        if (io.isShutdown()) return;
+        if (io.isShutdown() || !ready) return;
         io.execute(() -> {
             try {
                 JSONObject s = new JSONObject(orchestrator.statsJson());
@@ -403,12 +417,8 @@ public class GuideActivity extends AppCompatActivity {
         public void onBindViewHolder(VH h, int pos) {
             Message m = data.get(pos);
             h.tv.setText(m.text);
-            if (m.imagePath != null) {
-                h.iv.setImageBitmap(BitmapFactory.decodeFile(m.imagePath));
-                h.iv.setVisibility(View.VISIBLE);
-            } else {
-                h.iv.setVisibility(View.GONE);
-            }
+            // 图片不落盘：聊天图片只存 vision 摘要文本，消息列表无缩略图可显
+            h.iv.setVisibility(View.GONE);
             if (m.role.equals("user")) {
                 h.tv.setGravity(Gravity.END);
                 h.root.setGravity(Gravity.END);
