@@ -25,6 +25,11 @@ foreach(t ${AME_TESTS})
   add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
+# AME 2.0 分层记忆测试（M15–M19，仅依赖 core，lmem 存储）
+add_executable(test_lstore test_lstore.cpp)
+target_link_libraries(test_lstore PRIVATE ame_mem)
+add_test(NAME test_lstore COMMAND test_lstore)
+
 # bench 基准适配层测试（依赖 ame_bench 与夹具目录）
 add_executable(test_bench test_bench.cpp)
 target_link_libraries(test_bench PRIVATE ame_bench)
