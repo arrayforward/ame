@@ -328,6 +328,9 @@ public class GuideActivity extends AppCompatActivity {
 
     // refreshStatus：同 ChatActivity 口径（累计 chars/2 vs 发送估算）
     private void refreshStatus() {
+        // 蓝方修复：页面销毁后 io 已 shutdown，网络回调晚到再 execute 会
+        // RejectedExecutionException 崩主线程——销毁后直接跳过状态栏刷新
+        if (io.isShutdown()) return;
         io.execute(() -> {
             try {
                 JSONObject s = new JSONObject(orchestrator.statsJson());

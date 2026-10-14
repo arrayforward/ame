@@ -38,6 +38,11 @@ public final class MiniMaxClient {
     private static final Pattern THINK_PATTERN =
             Pattern.compile("<think>.*?</think>\\s*", Pattern.DOTALL);
 
+    /** M3 偶发把工具调用意图写成 XML 直接吐在 content 里（<function_calls><invoke…>），
+     * 与 think 段同法剥除；剥空由调用方兜底为"请开联网"提示 */
+    private static final Pattern FUNCALL_PATTERN =
+            Pattern.compile("<function_calls>.*?</function_calls>\\s*", Pattern.DOTALL);
+
     private MiniMaxClient() {
     }
 
@@ -61,6 +66,11 @@ public final class MiniMaxClient {
     /** 剥离 M3 内联思考段（<think>...</think>），返回展示/入库用的干净文本 */
     public static String stripThink(String s) {
         return THINK_PATTERN.matcher(s).replaceAll("").trim();
+    }
+
+    /** 剥离 content 里内联的工具调用 XML（<function_calls>...</function_calls>） */
+    public static String stripFunctionCalls(String s) {
+        return FUNCALL_PATTERN.matcher(s).replaceAll("").trim();
     }
 
     /** 整段对话补全；失败抛异常（含 HTTP 码），由调用方展示 */
@@ -131,7 +141,14 @@ public final class MiniMaxClient {
             } catch (org.json.JSONException e) {
                 throw new RuntimeException(e);
             }
-            return stripThink(content);
+            // M3 偶发把工具调用意图写成 <function_calls> XML 吐在 content 里
+            // （问时间/天气时它"想"调 web_search）——剥除；剥空了引导用户开联网
+            String clean = stripFunctionCalls(stripThink(content));
+            if (clean.isEmpty()) {
+                clean = "这个问题需要实时信息，我本地查不了。请点击输入栏的「联网」"
+                        + "开关后再问一次，我会联网搜索后回答。";
+            }
+            return clean;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -237,7 +254,7 @@ public final class MiniMaxClient {
             if (out.isEmpty()) throw new RuntimeException("webSearch 响应无 output_text");
             Log.d(TAG, "webSearch 200: model=" + BuildConfig.MINIMAX_MODEL
                     + " 结果" + out.length() + "字");
-            return stripThink(out);
+            return stripFunctionCalls(stripThink(out));
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

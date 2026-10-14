@@ -279,7 +279,8 @@ public class MemoryOrchestrator {
                         ? "你是一位文旅导游助手，正依据《" + guideTitle + "》为游客提供导览服务。"
                         + "优先依据下面的导览方案回答游客的问题（含拍照提问）；方案没有覆盖的，"
                         + "可补充通用知识并明确说明。回答口语化、条理清晰，每次不超过 150 字。"
-                        : "你是一个带长期记忆的对话助手。");
+                        : "你是一个带长期记忆的对话助手。你没有工具调用能力，不要输出 "
+                        + "function_calls 等调用标记；需要实时信息时提示用户开启「联网」。");
 
         if (guideText != null && !guideText.trim().isEmpty()) {   // isNotBlank
             sb.append("\n\n导览方案《").append(guideTitle).append("》：");
