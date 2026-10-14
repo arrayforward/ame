@@ -141,6 +141,7 @@ public class MainActivity extends AppCompatActivity {
                         + "字 图片" + plan.images.size() + "张");
                 // use{} → try-with-resources（快照兜底落盘由 JNI close 负责）
                 try (AmeEngine eng = AmeEngine.create(dir.getAbsolutePath())) {
+                    KeywordDict.ensureLoaded(this, eng);  // 方案分块提取依赖词典
                     long base = System.currentTimeMillis() / 1000;
                     // chunked(CHUNK).take(MAX) 等价：按块长切分并限制块数
                     List<String> chunks = new ArrayList<>();

@@ -111,6 +111,8 @@ public class ChatActivity extends AppCompatActivity {
         AmeEngine eng = AmeEngine.create(store.sessionDir(sessionId).getAbsolutePath());
         engine = eng;
         orchestrator = new MemoryOrchestrator(eng, store, sessionId);
+        // 关键词词典全局加载（同 io 单线程内先于任何发送执行）
+        io.execute(() -> KeywordDict.ensureLoaded(this, eng));
 
         tvStatus = findViewById(R.id.tvStatus);
         msgs.addAll(store.loadMessages(sessionId));

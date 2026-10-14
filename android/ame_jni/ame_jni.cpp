@@ -22,6 +22,7 @@
 #include <string>
 
 #include "ame/engine/engine.h"
+#include "ame/extractor/extractor.h"
 
 #define LOG_TAG "AmeMem"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -255,6 +256,20 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeRememberTurn(
     LOGE("rememberTurn(%s) 失败 code=%d: %.120s", j2s(env, speaker).c_str(),
          (int)r.code, t.c_str());
   return (jint)r.code;
+}
+
+// nativeLoadKeywordDict：运行时加载中文关键词词典（AC 自动机，带二进制缓存）。
+// dict=词典文件路径（word[\tfreq][\tcat] 格式），cache=AC 缓存路径；
+// 返回加载条数，<0 失败（调用方回退二元组兜底召回）。词典文件与缓存全局共享，
+// 内存中的 AC 结构随各 Engine 实例从共享缓存秒开加载。
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoadKeywordDict(
+    JNIEnv* env, jclass, jlong h, jstring dict, jstring cache) {
+  auto* e = get(h);
+  if (!e) return -1;
+  int n = e->extractor().load_keyword_dict_cached(j2s(env, dict), "", 10000000,
+                                                  j2s(env, cache));
+  LOGI("loadKeywordDict: %d 条", n);
+  return (jint)n;
 }
 
 // nativeRecall 伪代码：SeedQuery{text=query} 走默认 recall 管道（limit 截断），结果

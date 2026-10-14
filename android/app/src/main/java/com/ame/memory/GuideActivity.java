@@ -114,6 +114,8 @@ public class GuideActivity extends AppCompatActivity {
         sessionDir = store.sessionDir(sessionId);
         AmeEngine eng = AmeEngine.create(sessionDir.getAbsolutePath());
         engine = eng;
+        // 关键词词典全局加载（同 io 单线程内先于任何发送执行）
+        io.execute(() -> KeywordDict.ensureLoaded(this, eng));
         // 导览方案：全文注入 prompt（截断由 MemoryOrchestrator 控制）；无方案文件则退化为普通记忆对话
         String guideText = null;
         File guideFile = new File(sessionDir, "guide.txt");

@@ -43,6 +43,8 @@ public final class AmeEngine implements AutoCloseable {
 
     private static native int nativeLoad(long handle, String dir);
 
+    private static native int nativeLoadKeywordDict(long handle, String dict, String cache);
+
     public boolean isValid() {
         return handle != 0L;
     }
@@ -69,6 +71,11 @@ public final class AmeEngine implements AutoCloseable {
 
     public int save() {
         return nativeSave(handle, dir);
+    }
+
+    /** 加载中文关键词词典（AC 自动机 + 二进制缓存）；返回条数，<0 失败 */
+    public int loadKeywordDict(String dictPath, String cachePath) {
+        return nativeLoadKeywordDict(handle, dictPath, cachePath);
     }
 
     @Override

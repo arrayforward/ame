@@ -12,6 +12,14 @@ def lp = new Properties()
 def lpFile = rootProject.file('local.properties')
 if (lpFile.exists()) lpFile.withInputStream { lp.load(it) }
 
+// 关键词词典打包：构建期从仓库 lexicon 资产拷贝 67.8 万词分词词表进 APK assets
+// （不进源码树；首次运行再由 App 拷到私有目录并建 AC 缓存，多 session 共享同一份）。
+tasks.register('copyKeywordDict', Copy) {
+    from('../../lexicon/lexicon_src/segmentation') { include 'merged.txt' }
+    into layout.buildDirectory.dir('generated-assets')
+}
+preBuild.dependsOn 'copyKeywordDict'
+
 android {
     namespace 'com.ame.memory'
     compileSdk 34
@@ -55,6 +63,8 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     buildFeatures { buildConfig true }
+    // 构建期生成的 assets 目录（关键词词表）
+    sourceSets.main.assets.srcDir layout.buildDirectory.dir('generated-assets')
 }
 
 dependencies {
