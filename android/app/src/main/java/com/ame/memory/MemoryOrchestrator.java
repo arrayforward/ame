@@ -66,6 +66,10 @@ public class MemoryOrchestrator {
     /** 上一轮实际发送的上下文 token 估算（状态栏显示用） */
     private int lastSentTokens;
 
+    /** 快照节流计数与间隔（每 SAVE_EVERY 轮落盘一次全量快照） */
+    private int turnCount = 0;
+    private static final int SAVE_EVERY = 10;
+
     /** 每轮提交给 LLM 的完整上下文快照（诊断 tab 数据源，最多留 DIAG_MAX 轮） */
     public static final class TurnDiag {
         public final String query;                    // 触发本轮的 recall 查询
@@ -192,14 +196,18 @@ public class MemoryOrchestrator {
         Log.d(TAG, "[" + sessionId + "] 回复 " + reply.length() + "字: "
                 + take(reply.replace('\n', ' '), 100));   // take(100)
 
-        // 整轮写入：提问 → 回答 合成一条记忆事件 + 双侧消息落盘 + 图快照持久化
+        // 整轮写入：提问 → 回答 合成一条记忆事件 + 双侧消息落盘；
+        // 快照节流：全量 graph.json dump 每轮跑会随图变大而越来越卡（O(N²)），
+        // 改为每 SAVE_EVERY 轮一次 + 页面销毁时 JNI 兜底 save
         String pair = memoryText + "\n→ " + reply;
         int rc = engine.rememberTurn("user", pair, now, "u" + now, sessionId);
         store.appendMessage(sessionId, new Message("user", memoryText, now, imagePath));
         store.appendMessage(sessionId, new Message("assistant", reply, now + 1, null));
-        int rcS = engine.save();
+        int rcS = 0;
+        if (++turnCount % SAVE_EVERY == 0) rcS = engine.save();
         Log.d(TAG, "[" + sessionId + "] rememberTurn(整轮) rc=" + rc
-                + " save rc=" + rcS + "，本轮完成");
+                + (turnCount % SAVE_EVERY == 0 ? " save rc=" + rcS : " (快照节流)")
+                + "，本轮完成");
         return reply;
     }
 
