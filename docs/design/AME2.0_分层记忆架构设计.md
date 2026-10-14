@@ -238,13 +238,34 @@ user 1.0、assistant 0.7、vision 0.9、search 0.6。
 
 ## 10. 里程碑与验收（判决任务先于机制写死，D1/D4/D6 纪律）
 
-| 里程碑 | 内容 | 验收（全部自动化） |
+**评测纪律（防自嗨条款，先于一切实现）**：
+
+1. **新机制的"完成"唯一定义 = 测试通过 + bench 数字不谎**。任何"更好/更准/更稳"
+   的表述必须附 LoCoMo/LongMemEval 同配置 A/B（同 fixtures、同 LLM 缓存、同 judge），
+   否则一律视为未验证；
+2. **1.x 基线入档**：现有指标（LoCoMo v3 分 category 表见
+   `docs/reports/locomo_report.md`，LME/BEAM 口径见根 README 指标表与
+   `docs/reports/longmemeval_report.md`）即 2.0 的对照线，2.0 复跑结果与之一对一
+   对比，退化必须逐题归因、写进报告，不许默默带过；
+3. **bench 双后端切换**：`bench` 的 `ingest()`/`answer()` 抽象出 backend 开关
+   （`--store graph|lmem`），1.x Engine 与 2.0 `mem` 外观跑同一份数据/指标/缓存，
+   LLM 失败静默回退 baseline 的既有口径保持；
+4. **召回层独立验收**：不只看最终 judge——`evidence_dia_ids` 覆盖率（金标证据
+   是否被召回进 top-k）作为 recall 质量的硬指标单独出数，先保证取证，再谈作答；
+5. **D6 纪律**：每个合入的指标数字必须能从发布产物（commit + 固定种子 +
+   缓存）一键重生成，报告记录命令与 commit。
+
+| 里程碑 | 内容 | 验收（全部自动化 + bench 回归） |
 |---|---|---|
-| **P0** | M15 观测层 + M16 事实层(fold/corrects/半衰期) + M17 索引(倒排/replay) + M18 视图(打包/去重/可靠性排序) + owner 分片 + erase + C++ 单测 | ①erase 后物理无残留+tombstone；②fold 权威覆盖时间、corrects 留痕生效；③半衰期不改写基准；④drop 索引→replay→召回结果逐比特一致；⑤视图打包 Q→A 且视图零落盘副作用；⑥公共域不受个人 erase 影响 |
-| P1 | 外观层 `mem` 网关（owner 作用域 API）+ JNI 切换 + App 接线（chat/guide 双模式）+ 1.x graph.json→观测层迁移工具 | 手机上完整对话闭环；旧 session 数据可迁移 |
-| P2 | declare 重认领 + 来源可靠性闭环 + LLM 提取插件 + G1–G3 校验门 | 同名实体少计修复 A/B；纠错反馈改变后续排序 |
-| P3 | 联想扩散三路召回 + 多分辨率时间桶 | 多跳 recall 题准确率不低于 1.x |
-| P4 | 学习（轮边界梯度对齐监督，按 owner 隔离） | fold 权重学习不跨 owner 泄漏 |
+| **P0** | M15 观测层 + M16 事实层(fold/corrects/半衰期) + M17 索引(倒排/replay) + M18 视图(打包/去重/可靠性排序) + owner 分片 + erase + C++ 单测 | ①单元六项（erase 无残留/fold/corrects/半衰期/replay 逐比特/视图打包）；⑦**三夹具 + LoCoMo sample 复跑：evidence_dia_ids 覆盖率 ≥ 1.x 同配置，judge 分不降**（入 `docs/reports/`） |
+| P1 | 外观层 `mem` 网关 + `--store lmem` 切换 + JNI/App 接线 + 1.x→观测层迁移工具 | 全量 LoCoMo/LME 双后端对比表；旧数据迁移后抽样 recall 一致 |
+| P2 | declare 重认领 + 来源可靠性闭环 + LLM 提取插件 + G1–G3 校验门 | 同名实体少计修复的 A/B；纠错反馈排序影响的可测实验；LME 偏好类题型不回归 |
+| P3 | 联想扩散三路召回 + 多分辨率时间桶 | 多跳/时序题（LoCoMo cat2 那 12 题）judge 不低于 1.x 修复后口径（11/12） |
+| P4 | 学习（轮边界梯度对齐监督，按 owner 隔离） | fold 权重学习跨 owner 零泄漏（单测）+ 不劣化基线的 bench 证据 |
+
+**与 1.x 并存约定**：`seed/diffusion/rerank/...` 不动；新模块 `memobs/memfact/
+memindex/memview/mem`（M15–M19）仅依赖 `core`；bench 经 `--store` 开关双跑，
+`runs/` 存档 ndjson 按 store 分目录，报告并存。
 
 **与 1.x 并存约定**：`seed/diffusion/rerank/...` 不动；新模块 `memobs/memfact/
 memindex/memview/mem`（M15–M19）仅依赖 `core`；bench 可逐步切到 2.0 存储复跑
