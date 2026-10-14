@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 共享路径：拍照产物与压缩图存 filesDir/images/ -->
+<paths>
+    <files-path name="images" path="images/" />
+    <files-path name="sessions" path="sessions/" />
+</paths>

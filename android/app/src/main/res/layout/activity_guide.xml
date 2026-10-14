@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 导游聊天页：与 activity_chat 同构（状态栏 + 消息列表 + 两行输入区），
+     第一行多一个「方案」按钮；第二行输入框占满宽 + 发送。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical" android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <!-- 上下文外置可视化：累计记忆 vs 实际发送 token 对比 + 引擎规模 + 装配参数 -->
+    <TextView android:id="@+id/tvStatus" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:padding="6dp"
+        android:textSize="12sp" android:textColor="#555555"
+        android:background="#F5F5F5" android:gravity="center" />
+
+    <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvMessages"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <!-- 待发送图片预览行（默认隐藏） -->
+    <LinearLayout android:id="@+id/rowPending" android:orientation="horizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:visibility="gone" android:padding="4dp" android:gravity="center_vertical">
+        <ImageView android:id="@+id/ivPending" android:layout_width="64dp"
+            android:layout_height="64dp" android:scaleType="centerCrop" />
+        <TextView android:id="@+id/tvPending" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="待发送图片"
+            android:padding="8dp" />
+        <Button android:id="@+id/btnClearImg" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="移除" />
+    </LinearLayout>
+
+    <!-- 输入区两行布局：第一行操作按钮（含方案），第二行输入框（占满宽）+ 发送 -->
+    <LinearLayout android:orientation="vertical" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:padding="2dp">
+        <LinearLayout android:orientation="horizontal"
+            android:layout_width="match_parent" android:layout_height="wrap_content">
+            <Button android:id="@+id/btnPlan" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="@string/plan_button" />
+            <Button android:id="@+id/btnPick" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="选图" />
+            <Button android:id="@+id/btnCamera" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="拍照" />
+        </LinearLayout>
+        <LinearLayout android:orientation="horizontal"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+            <EditText android:id="@+id/etInput" android:layout_width="0dp"
+                android:layout_height="wrap_content" android:layout_weight="1"
+                android:hint="@string/input_hint_guide" android:inputType="textMultiLine"
+                android:minLines="1" android:maxLines="4" />
+            <Button android:id="@+id/btnSend" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="@string/send" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

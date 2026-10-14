@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- session 列表页：顶部新建按钮 + 列表 + 底部双 tab（对话/导游） -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical" android:layout_width="match_parent"
+    android:layout_height="match_parent">
+    <Button android:id="@+id/btnNew" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="@string/new_session" />
+    <TextView android:id="@+id/tvEmpty" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="@string/empty_sessions"
+        android:gravity="center" android:padding="24dp" android:visibility="gone" />
+    <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvSessions"
+        android:layout_width="match_parent" android:layout_height="0dp"
+        android:layout_weight="1" />
+    <!-- 底部 tab：对话 / 导游（选中态由 MainActivity 变色） -->
+    <LinearLayout android:orientation="horizontal"
+        android:layout_width="match_parent" android:layout_height="wrap_content">
+        <Button android:id="@+id/tabChat" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="@string/tab_chat" />
+        <Button android:id="@+id/tabGuide" android:layout_width="0dp"
+            android:layout_height="wrap_content" android:layout_weight="1"
+            android:text="@string/tab_guide" />
+    </LinearLayout>
+</LinearLayout>

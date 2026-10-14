@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AME 记忆对话</string>
+    <string name="new_session">新建会话</string>
+    <string name="new_guide">选择导览方案 PDF</string>
+    <string name="tab_chat">对话</string>
+    <string name="tab_guide">导游</string>
+    <string name="delete">删除</string>
+    <string name="send">发送</string>
+    <string name="input_hint">输入消息…</string>
+    <string name="input_hint_guide">提问，或拍照后提问…</string>
+    <string name="empty_sessions">暂无会话，点上方按钮新建</string>
+    <string name="empty_guides">暂无导览方案，点上方按钮选择 PDF 导入（一个游客一个 session）</string>
+    <string name="plan_button">方案</string>
+</resources>

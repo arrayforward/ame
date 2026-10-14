@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App 清单：联网权限（MiniMax API）+ 两个 Activity（session 列表 / 聊天页） -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/Theme.AmeMemory"
+        android:allowBackup="false"
+        android:supportsRtl="true">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".ChatActivity" android:exported="false" />
+        <!-- 导游模式：绑定导览方案 PDF 的聊天页（拍照提问 + 方案取证 + 每游客独立记忆） -->
+        <activity android:name=".GuideActivity" android:exported="false" />
+        <!-- 拍照产物共享（TakePicture 合约用；不声明 CAMERA 权限则无需运行时权限） -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.ame.memory.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

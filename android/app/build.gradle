@@ -1,0 +1,69 @@
+// App 模块构建脚本：JNI 外源构建（ame_jni/CMakeLists.txt）+ Kotlin Android 常规配置。
+// 关键点：
+//   - externalNativeBuild 指向 ../ame_jni/CMakeLists.txt（AGP 注入 NDK 工具链）；
+//   - ABI 只打 arm64-v8a（减小体积，真机主流）；
+//   - MiniMax key 从 local.properties（gitignore）读入 BuildConfig，代码/日志不落 key。
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// local.properties：sdk.dir 由 AGP 自读；这里只取自定义项（MINIMAX_API_KEY 等）
+def lp = new Properties()
+def lpFile = rootProject.file('local.properties')
+if (lpFile.exists()) lpFile.withInputStream { lp.load(it) }
+
+android {
+    namespace 'com.ame.memory'
+    compileSdk 34
+    ndkVersion '27.0.12077973'
+
+    defaultConfig {
+        applicationId "com.ame.memory"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.1"
+        buildConfigField "String", "MINIMAX_API_KEY", "\"${lp.getProperty('MINIMAX_API_KEY', '')}\""
+        buildConfigField "String", "MINIMAX_BASE_URL", "\"${lp.getProperty('MINIMAX_BASE_URL', 'https://api.minimaxi.com/v1')}\""
+        buildConfigField "String", "MINIMAX_MODEL", "\"${lp.getProperty('MINIMAX_MODEL', 'MiniMax-M3')}\""
+        // 装配上限（可调，状态栏同步显示）：滑窗轮数 + recall 证据条数
+        buildConfigField "int", "CONTEXT_WINDOW_TURNS", "${lp.getProperty('CONTEXT_WINDOW_TURNS', '10')}"
+        buildConfigField "int", "RECALL_TOP_K", "${lp.getProperty('RECALL_TOP_K', '5')}"
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+                abiFilters 'arm64-v8a'
+            }
+        }
+    }
+
+    buildTypes {
+        debug { minifyEnabled false }
+        release { minifyEnabled false }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../ame_jni/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+    buildFeatures { buildConfig true }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.recyclerview:recyclerview:1.3.2'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'org.json:json:20240303'
+    // 导游模式：PDF 文本/内嵌图提取（纯 JVM 解析，不联网）
+    implementation 'com.tom-roush:pdfbox-android:2.0.27.0'
+}

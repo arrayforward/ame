@@ -1,0 +1,16 @@
+// AME Android 工程顶层设置：插件仓库 + 模块声明
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "ame-android"
+include ':app'
