@@ -10,6 +10,7 @@
  * 依赖关系：依赖 bench.h、M12 engine、M10 time（parse_relative）。
  */
 #include "ame/bench/bench.h"
+#include "ame/bench/store.h"
 
 #include "ame/engine/engine.h"
 #include "ame/extractor/extractor.h"
@@ -107,18 +108,18 @@ static std::vector<std::string> content_words(const std::string& question) {
   return words;
 }
 
-// content_scores 伪代码：对一组候选事件节点，返回每个节点的内容词 BM25-lite 得分
-//   （与实体通道步骤4 同公式，无同义词扩展——终排追求精确命中，扩展已在召回侧生效）。
-static std::vector<double> content_scores(const std::string& question,
-                                          const std::vector<const Node*>& cands) {
+// content_scores_for_texts：对一组候选文本返回每个的内容词 BM25-lite 得分
+//   （store.h 导出：lmem 后端终排与 1.x answer() 步骤4 共用同一公式；
+//   df/idf 在候选集内统计 log(1+N/(1+df))，得分 = Σ idf·tf/(tf+1) 按 idf_sum 归一）。
+std::vector<double> content_scores_for_texts(const std::string& question,
+                                             const std::vector<std::string>& texts) {
   std::vector<std::string> words = content_words(question);
-  std::vector<double> scores(cands.size(), 0.0);
-  if (words.empty() || cands.empty()) return scores;
+  std::vector<double> scores(texts.size(), 0.0);
+  if (words.empty() || texts.empty()) return scores;
   std::unordered_map<std::string, int> df;
-  std::vector<std::unordered_map<std::string, int>> tfs(cands.size());
-  for (size_t i = 0; i < cands.size(); ++i) {
-    if (!cands[i]) continue;  // uid 失效兜底：空文本计 0 分
-    for (auto& w : content_words(cands[i]->text)) {
+  std::vector<std::unordered_map<std::string, int>> tfs(texts.size());
+  for (size_t i = 0; i < texts.size(); ++i) {
+    for (auto& w : content_words(texts[i])) {
       ++tfs[i][w];
     }
     for (auto& w : words)
@@ -127,10 +128,10 @@ static std::vector<double> content_scores(const std::string& question,
   double idf_sum = 0;
   std::unordered_map<std::string, double> idf;
   for (auto& w : words) {
-    idf[w] = std::log(1.0 + (double)cands.size() / (1.0 + df[w]));
+    idf[w] = std::log(1.0 + (double)texts.size() / (1.0 + df[w]));
     idf_sum += idf[w];
   }
-  for (size_t i = 0; i < cands.size(); ++i) {
+  for (size_t i = 0; i < texts.size(); ++i) {
     double s = 0;
     for (auto& w : words) {
       auto it = tfs[i].find(w);
@@ -139,6 +140,15 @@ static std::vector<double> content_scores(const std::string& question,
     scores[i] = idf_sum > 0 ? s / idf_sum : 0;
   }
   return scores;
+}
+
+// content_scores：节点版委托（空指针按空文本计 0 分，与历史行为一致）
+static std::vector<double> content_scores(const std::string& question,
+                                          const std::vector<const Node*>& cands) {
+  std::vector<std::string> texts(cands.size());
+  for (size_t i = 0; i < cands.size(); ++i)
+    if (cands[i]) texts[i] = cands[i]->text;
+  return content_scores_for_texts(question, texts);
 }
 
 // ---- 两阶段检索（实体档案·检索角色修正，设计文档 8.3）----

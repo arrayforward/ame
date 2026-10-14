@@ -8,7 +8,7 @@
 //           P0 为内存版（设计允许带校验的持久化缓存，本期不做）。
 //
 // 关键算法/数据结构：
-//   - 分词 tokenize：内置 CJK 字符二元组 + ASCII 词（小写化），
+//   - 分词 memindex_tokenize：内置 CJK 字符二元组 + ASCII 词（小写化），
 //     不依赖 extractor（P0 简化，1.x M1 停用）；
 //   - 倒排：term -> owner -> seq 列表（观测与事实两套 posting）；
 //   - 槽位目录：fact.entity（"owner:名"）-> fact seqs；
@@ -32,7 +32,7 @@
 namespace ame {
 
 // P0 内置分词：CJK 连续段取二元组（单字取一元），ASCII 取 [a-z0-9_]+ 小写词
-std::vector<std::string> tokenize(const std::string& text);
+std::vector<std::string> memindex_tokenize(const std::string& text);
 
 // 一次召回命中：候选 seq + 命中词列表（供视图层 IDF 加权打分）
 struct IndexHit {

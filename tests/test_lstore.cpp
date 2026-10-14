@@ -278,6 +278,7 @@ static void test_index_rebuild() {
       CHECK(r2[i].ts == r1[qi][i].ts);
       CHECK(r2[i].score == r1[qi][i].score);  // 逐比特：同序浮点运算
       CHECK(r2[i].source_kind == r1[qi][i].source_kind);
+      CHECK(r2[i].ref_obs == r1[qi][i].ref_obs);  // 证据回溯字段同 rebuild 逐比特一致
     }
   }
   CHECK(m.profile("u1", now).dump() == p1);
@@ -305,6 +306,21 @@ static void test_view_packaging_and_no_side_effect() {
     }
   }
   CHECK(packed);
+
+  // 证据回溯：ref_obs 指向的观测经 Mem::obs 取回，原文与 meta 一致（dia_id 通道）
+  m.remember("u1", "c1", "user", "回溯测试 轮", 1700000120, [] {
+    Json meta = Json::object();
+    meta.set("dia_id", Json::string("D9:9"));
+    return meta;
+  }());
+  const auto r2 = m.recall("回溯测试", "u1", 5, 1700000200);
+  CHECK(!r2.empty());
+  CHECK(r2[0].ref_obs != 0);
+  const Observation* back = m.obs(r2[0].ref_obs);
+  CHECK(back != nullptr);
+  CHECK(back->text.find("回溯测试") != std::string::npos);
+  const Json* dia = back->meta.find("dia_id");
+  CHECK(dia != nullptr && dia->as_str() == "D9:9");
 
   // 零副作用：synthesize 调用前后观测/事实 replay 逐比特一致
   const std::string obs_before = dump_obs(m.obs_store());

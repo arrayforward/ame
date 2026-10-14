@@ -3,9 +3,10 @@ add_library(ame_bench STATIC
   src/ingest_answer.cpp
   src/metrics.cpp
   src/lexicon_apply.cpp
+  src/store.cpp
 )
 target_include_directories(ame_bench PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(ame_bench PUBLIC ame_engine ame_time)
+target_link_libraries(ame_bench PUBLIC ame_engine ame_time ame_mem)
 
 add_executable(ame_bench_cli cli/main.cpp)
 target_link_libraries(ame_bench_cli PRIVATE ame_bench ame_llm)

@@ -61,6 +61,7 @@ std::vector<EvidenceItem> View::synthesize(const std::string& query,
     Cand c;
     c.item.ts = o->ts;
     c.item.source_kind = o->kind;
+    c.item.ref_obs = o->seq;  // 证据可回溯到观测（meta 如 dia_id 经 Mem::obs 取）
     c.item.score = alpha_ * lex + beta_ * kind_reliability(o->kind) + gamma_ * decay;
     c.seq = o->seq;
     if (o->kind == "user") {
@@ -93,6 +94,7 @@ std::vector<EvidenceItem> View::synthesize(const std::string& query,
     c.seq = fd.fact.seq;
     c.item.ts = fd.fact.ts;
     c.item.source_kind = reality_name(fd.fact.reality);
+    c.item.ref_obs = fd.fact.source_obs;  // 事实证据回溯其来源观测（0=直写无源）
     c.item.score = alpha_ * lex + beta_ * reality_reliability(fd.fact.reality) +
                    gamma_ * decay;
     c.item.text = fd.fact.entity + "." + fd.fact.attr + "=" + fd.fact.value;

@@ -60,6 +60,8 @@ class Mem {
   // recall：视图层合成证据（永不落盘，零存储副作用）
   std::vector<EvidenceItem> recall(const std::string& query, const std::string& owner,
                                    int k, int64_t now);
+  // 证据回溯：按 seq 取观测（EvidenceItem.ref_obs → meta 如 dia_id）；未找到返回 nullptr
+  const Observation* obs(uint64_t seq) const { return obs_.get(seq); }
   // profile：fold 物化最新视图（Declared+latest facts 统一走三序裁决），
   // 返回 {entity: {attr: {value, reality, base, effective, ts, seq}}}
   Json profile(const std::string& owner, int64_t now);

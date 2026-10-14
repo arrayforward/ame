@@ -40,7 +40,7 @@ inline bool is_cjk(unsigned char a) {
 //   步骤1：扫描字节流，ASCII 词字符累积成词（小写），遇其它 flush；
 //   步骤2：CJK UTF-8 三字节序列按字符切成连续段，段内滑窗取二元组；
 //   步骤3：段长 1 退化为单字一元。
-std::vector<std::string> tokenize(const std::string& text) {
+std::vector<std::string> memindex_tokenize(const std::string& text) {
   std::vector<std::string> out;
   std::string word;
   auto flush_word = [&]() {
@@ -94,7 +94,7 @@ void MemIndex::post(Posting& p, const std::string& term, const std::string& owne
 //          写 Q→A 邻接（last_user_ → 本 seq）。
 void MemIndex::add_observation(const Observation& o) {
   ++obs_count_[o.owner];
-  for (const auto& t : tokenize(o.text)) post(obs_posting_, t, o.owner, o.seq);
+  for (const auto& t : memindex_tokenize(o.text)) post(obs_posting_, t, o.owner, o.seq);
   if (o.kind == "user") {
     last_user_[o.owner] = o.seq;
   } else if (o.kind == "assistant") {
@@ -108,7 +108,7 @@ void MemIndex::add_observation(const Observation& o) {
 //   步骤1：entity+attr+value 拼接分词进 fact_posting_；
 //   步骤2：槽位目录 slot_dir_[entity] 追加 fact seq。
 void MemIndex::add_fact(const Fact& f) {
-  for (const auto& t : tokenize(f.entity + " " + f.attr + " " + f.value))
+  for (const auto& t : memindex_tokenize(f.entity + " " + f.attr + " " + f.value))
     post(fact_posting_, t, f.owner, f.seq);
   slot_dir_[f.entity].push_back(f.seq);
 }
@@ -121,7 +121,7 @@ void MemIndex::add_fact(const Fact& f) {
 //   步骤3：按 (命中词数 desc, seq asc) 全序排序取 top-k。
 std::vector<IndexHit> MemIndex::search_posting(const Posting& p, const std::string& query,
                                                const std::string& owner, int k) {
-  std::vector<std::string> terms = tokenize(query);
+  std::vector<std::string> terms = memindex_tokenize(query);
   std::unordered_set<std::string> seen;
   std::unordered_map<uint64_t, std::vector<std::string>> acc;
   for (const auto& t : terms) {

@@ -23,10 +23,12 @@
 
 #include "ame/bench/bench.h"
 #include "ame/bench/metrics.h"
+#include "ame/bench/store.h"
 #include "ame/core/json.h"
 #include "ame/engine/engine.h"
 #include "ame/llm/components.h"
 #include "ame/llm/llm.h"
+#include "ame/mem/mem.h"
 
 using namespace ame;
 
@@ -36,6 +38,7 @@ namespace {
 struct Cli {
   BenchConfig cfg;
   std::string dataset, data;
+  std::string store = "graph";   // --store graph|lmem：存储后端（默认 graph=1.x Engine）
   int limit = 0;
   std::string dump_path;       // --dump：逐题结果 NDJSON 落盘路径
   std::string build_lexicon;   // --build-lexicon：词频表路径（构建词典后退出）
@@ -58,6 +61,7 @@ Cli parse_args(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "--dataset") cli.dataset = next();
     else if (a == "--data") cli.data = next();
+    else if (a == "--store") cli.store = next();
     else if (a == "--limit") cli.limit = std::atoi(next().c_str());
     else if (a == "--k") cli.cfg.k = std::atoi(next().c_str());
     else if (a == "--abstain-threshold") cli.cfg.abstain_threshold = std::atof(next().c_str());
@@ -111,6 +115,7 @@ Cli parse_args(int argc, char** argv) {
 void usage() {
   std::fprintf(stderr,
                "用法: ame_bench --dataset locomo|longmemeval|beam --data <path>\n"
+               "      [--store graph|lmem]（默认 graph=1.x Engine；lmem=2.0 分层存储）\n"
                "      [--extractor rule|llm] [--answer baseline|llm] [--judge f1|llm]\n"
                "      [--limit N] [--k 10] [--concurrency 8] [--model deepseek-v4-flash]\n"
                "      [--cache-dir bench/cache] [--config bench/config/deepseek.local.json]\n"
@@ -175,6 +180,30 @@ int main(int argc, char** argv) {
   }
   if (cli.limit > 0 && (int)cases.size() > cli.limit) cases.resize(cli.limit);
 
+  // --store 校验 + lmem 下 1.x 专属开关明确忽略（设计 §10.3 双后端纪律）
+  if (cli.store != "graph" && cli.store != "lmem") {
+    std::fprintf(stderr, "未知存储后端: %s（仅支持 graph|lmem）\n", cli.store.c_str());
+    return 1;
+  }
+  if (cli.store == "lmem") {
+    std::string ignored;
+    auto mark = [&](const char* name, bool on) {
+      if (on) { if (!ignored.empty()) ignored += ","; ignored += name; }
+    };
+    mark("save-graph", !cli.save_graph.empty());
+    mark("load-graph", !cli.load_graph.empty());
+    mark("load-lexicon", !cli.load_lexicon.empty());
+    mark("feedback-dir", !cli.feedback_dir.empty());
+    mark("beam", cli.cfg.beam_width > 0);
+    mark("think-mode=ircot", cli.cfg.think_mode == "ircot");
+    mark("answer-mode=aggregate", cli.cfg.answer_mode_agg == "aggregate");
+    mark("weights", cli.has_weights);
+    if (!ignored.empty())
+      std::fprintf(stderr,
+                   "[lmem] 忽略 1.x 专属开关: %s（lmem 取证走 Mem.recall 统一通道）\n",
+                   ignored.c_str());
+  }
+
   // --question-ids：只评测指定题目（固定小样本 A/B 用）
   std::unordered_set<std::string> only_qids;
   if (!cli.question_ids.empty()) {
@@ -236,6 +265,34 @@ int main(int argc, char** argv) {
       for (auto& q : c.questions)
         if (only_qids.count(q.id)) { any = true; break; }
       if (!any) continue;
+    }
+    // --store lmem：2.0 分层存储后端（M15–M19）。每 case 独立内存态 Mem，
+    // owner=conversation_id；取证/证据回溯经 LmemStore（store.cpp），
+    // LLM 答题/判分/报表与 graph 共用下游代码（同缓存同 judge 口径）。
+    if (cli.store == "lmem") {
+      auto mem_up = std::make_unique<Mem>();
+      LmemStore ls(mem_up.get(), c.conversation_id);
+      IngestStats st = ls.ingest_case(c);
+      std::fprintf(stderr, "[case %s] events=%d entities=%d keywords=%d questions=%zu\n",
+                   c.conversation_id.c_str(), st.events, st.entities, st.keywords,
+                   c.questions.size());
+      for (auto& q : c.questions) {
+        if (!only_qids.empty() && !only_qids.count(q.id)) continue;
+        if (q.category > 0) {  // LoCoMo：对抗题类别判定与 graph 同口径
+          q.unanswerable = false;
+          for (int cat : cli.cfg.abstention_categories)
+            if (q.category == cat) q.unanswerable = true;
+        }
+        Pending p;
+        p.q = &q;
+        p.group = q.qtype;
+        p.eng_idx = 0;  // 无引擎反馈回流（feedback-dir 为 1.x 专属，已在上方忽略）
+        StoreAnswer sa = ls.answer_question(q, cli.cfg);
+        p.base = std::move(sa.result);
+        for (auto& ev : sa.evidence) p.ev_texts.push_back(std::move(ev.text));
+        pendings.push_back(std::move(p));
+      }
+      continue;
     }
     // 跨 case 隔离；--feedback-dir 启用 M11/M14（每 case 独立目录）。
     // 注意：只有启用反馈时才保活 Engine（判分阶段回流用）；否则每 case 用完即销毁，

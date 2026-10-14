@@ -37,6 +37,8 @@ struct EvidenceItem {
   int64_t ts = 0;          // 证据时刻
   double score = 0;        // 三路加权总分
   std::string source_kind; // user|assistant|vision|declared|observed|derived
+  uint64_t ref_obs = 0;    // 来源观测 seq（观测证据=其 seq；事实证据=source_obs，可无）；
+                           // 上层经 Mem::obs(seq) 回溯 meta（如 dia_id），0=无法回溯
 };
 
 class View {

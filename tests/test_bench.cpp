@@ -9,7 +9,9 @@
 
 #include "ame/bench/bench.h"
 #include "ame/bench/metrics.h"
+#include "ame/bench/store.h"
 #include "ame/engine/engine.h"
+#include "ame/mem/mem.h"
 #include "test_util.hpp"
 
 using namespace ame;
@@ -294,6 +296,41 @@ static void test_evidence_content_rerank() {
   CHECK(front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
 }
 
+// 双后端存储抽象（--store graph|lmem，设计 §10.3）：同一 case 经 IStore 摄入取证，
+// 两后端证据均可回溯 dia_id（graph 自事件 attrs，lmem 自观测 meta.ref_obs），
+// GraphStore 结果与直接 answer() 逐题一致（适配器零行为差）。
+static void test_store_adapters() {
+  auto loco = load_locomo(std::string(kFixtureDir) + "/locomo_mini.json");
+  const BenchCase& c = loco[0];
+  const BenchQuestion& q = c.questions[1];  // 两个金标 dia_id
+  BenchConfig cfg;
+
+  Engine e;
+  GraphStore gs(&e);
+  CHECK(gs.ingest_case(c).events == 9);
+  auto ra = gs.answer_question(q, cfg);
+  auto direct = answer(e, q, cfg);
+  CHECK(ra.result.evidence_dia_ids == direct.evidence_dia_ids);  // 适配器零行为差
+  CHECK(ra.result.abstained == direct.abstained);
+  CHECK(!ra.evidence.empty());
+  CHECK(ra.evidence.size() == ra.result.evidence_uids.size());
+  bool graph_dia = false;
+  for (auto& ev : ra.evidence)
+    if (!ev.dia_id.empty()) graph_dia = true;
+  CHECK(graph_dia);  // graph 证据 dia_id 从事件 attrs 取
+
+  Mem m;
+  LmemStore ls(&m, c.conversation_id);
+  CHECK(ls.ingest_case(c).events == 9);
+  auto rb = ls.answer_question(q, cfg);
+  CHECK(!rb.result.evidence_dia_ids.empty());
+  CHECK(rb.evidence.size() == rb.result.evidence_uids.size());
+  bool lmem_dia = false;
+  for (auto& ev : rb.evidence)
+    if (!ev.dia_id.empty()) lmem_dia = true;
+  CHECK(lmem_dia);  // lmem 证据 dia_id 经 ref_obs → 观测 meta 回溯
+}
+
 int main() {
   test_load_fixtures();
   test_ingest_graph();
@@ -305,5 +342,6 @@ int main() {
   test_chinese_lexicon();
   test_evidence_content_rerank();
   test_parse_session_date();
+  test_store_adapters();
   return AME_TEST_REPORT();
 }

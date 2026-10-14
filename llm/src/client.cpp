@@ -53,8 +53,11 @@ static int curl_transport(const std::string& base_url, const std::string& api_ke
   }
   close(bfd);
   close(cfd);
+  // 注意：格式串必须保持反斜杠-n 两字面字符（C 串 \\n），由 curl 自行解释——
+  // 若用 C 转义 '\n'，运行时串内嵌真实换行，cmd.exe 按空白切分会毁掉 -w 参数
+  // （WSL/sh 下引号保护换行所以历史正常；原生 Windows 下此前一律 http 0）。
   std::string cmd = "curl -sS -m 120 -K " + std::string(conf_path) + " -X POST " + base_url +
-                    "/chat/completions --data @" + body_path + " -w '\n%{http_code}'";
+                    "/chat/completions --data @" + body_path + " -w \"\\n%{http_code}\"";
   std::string raw;
   FILE* fp = popen(cmd.c_str(), "r");
   if (fp) {
