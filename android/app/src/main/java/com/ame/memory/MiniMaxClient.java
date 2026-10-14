@@ -142,11 +142,16 @@ public final class MiniMaxClient {
                 throw new RuntimeException(e);
             }
             // M3 偶发把工具调用意图写成 <function_calls> XML 吐在 content 里
-            // （问时间/天气时它"想"调 web_search）——剥除；剥空了引导用户开联网
+            // （问时间/天气时它"想"调 web_search）——剥除。
+            // 注意区分两种"空"：剥掉了 function_call 才提示开联网；
+            // 纯空 content（推理预算耗尽等）给中性重试提示，不许误报"需要实时信息"
+            boolean hadFunctionCall = content.contains("<function_calls");
             String clean = stripFunctionCalls(stripThink(content));
             if (clean.isEmpty()) {
-                clean = "这个问题需要实时信息，我本地查不了。请点击输入栏的「联网」"
-                        + "开关后再问一次，我会联网搜索后回答。";
+                clean = hadFunctionCall
+                        ? "这个问题需要实时信息，我本地查不了。请点击输入栏的「联网」"
+                                + "开关后再问一次，我会联网搜索后回答。"
+                        : "（这次回答超时没有生成完整内容，请再发一次）";
             }
             return clean;
         } catch (IOException e) {
