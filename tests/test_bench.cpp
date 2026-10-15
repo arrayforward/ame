@@ -251,8 +251,8 @@ static void test_chinese_lexicon() {
   }
 }
 
-// 复活工程 R1：灌库源区分——distilled 源全量入别名表（like→love 不再被守卫吃掉），
-// 无 source 字段的源维持 alias_ok 双向守卫（行为逐比特不变），防互换成环。
+// 灌库源区分（第六轮修订）：distilled 源彻底旁路等价归一（graded 边表替代，§14），
+// 无 source 字段的源维持 alias_ok 双向守卫（行为逐比特不变）。
 static void test_apply_lexicon_source_guard() {
   const char* distilled = "/tmp/ame_test_lex_distilled.json";
   const char* plain = "/tmp/ame_test_lex_plain.json";
@@ -265,14 +265,13 @@ static void test_apply_lexicon_source_guard() {
     f << std::string("{\"source\":\"distilled\",") << (body + 1);
   }
   { std::ofstream f(plain); f << body; }
-  // distilled：like->love / like->prefer / love->adore 全量入表
+  // distilled：第六轮起不写别名表（词级语义走 WordEdgeTable），normalize 原样返回
   {
     Engine e;
     int applied = 0;
     CHECK(apply_lexicon(e, distilled, &applied) == Err::Ok);
-    CHECK(e.keywords().normalize("love") == "like");
-    CHECK(e.keywords().normalize("prefer") == "like");
-    CHECK(e.keywords().normalize("adore") == "love");
+    CHECK(e.keywords().normalize("love") == "love");
+    CHECK(e.keywords().normalize("prefer") == "prefer");
   }
   // 无 source 字段：守卫保持（love 是主词且 strong 不含 like → 拒）
   {

@@ -584,3 +584,180 @@ q19/q64 本体仍 miss（D6:6 仅 love 单桥 0.5 < 1.0 收录线；D15:28 无�
 - ctest **20/20 全绿**（11.39s，llm 层改动后全量 rebuild）。
 - 运行产物：`bench/runs/lexicon_ab/{B_valid,C_valid_dict,Bprime_valid_nobridge,
   C_rerun1,C_rerun2}.*`、`bench/runs/lexicon_en_validate.log`。
+
+---
+
+## 13. 第五轮（架构 pivot）：graded similarity 替代等价归一——终局
+
+> 用户裁决：不要归一表，要近似程度的向量表。词级稀疏相似表 word_sim 替换
+> 等价别名归一，消费端走连续命中分。本轮为最终轮。
+
+### 13.1 数据：词级近似连续打分（M3，`--score-sims`）
+
+- 候选对 = lexicon_en.json 的 strong ∪ near 并集（逐词去重），prompt 打 1-10 分
+  （10=同义可互换 / 7-9=高度近义常可替换 / 4-6=相关但多数场景不可替换 / 1-3=弱相关），
+  /10 归一；批量 50、磁盘缓存、断点续跑、失败批 fail-open 记 5 分。
+- 成本：**53,485 对 / 1,070 次调用 / 3m52s / 失败批 0**。
+- 产出 `lexicon_en_sim.json`（source=distilled-sim）：**11,120 词 / 53,470 边**。
+  分值分布：<0.3 仅 395 边（0.7%），质量集中在 0.6-0.8（0.6:13,044 / 0.7:14,372 /
+  0.8:11,518），1.0 共 819。
+- 多义词 graded 实证：bank → financial institution 0.9 / embankment 0.7 / shore 0.6
+  / coast 0.5——每条边带场景分，max 语义按上下文取最佳可用边 ✓；
+  like → enjoy 0.8 / love 0.7 / fancy 0.7（第四轮可互换校验判 no 的方向性桥，
+  graded 打分下保留为 0.7 弱桥——pivot 正确性实证）。
+
+### 13.2 加载与消费（WordSimTable，seed 模块；`--word-sim` 默认关）
+
+- WordSimTable：{word → (word2,score) 降序行}；sim(a,b) 双向查（a→b 优先退化 b→a）；
+  bench 级单例只读指针经 BenchConfig 透传 answer() → SeedQuery.word_sim。
+- 消费（seed_generator 词法通道，**替换**而非叠加第四轮桥介门）：
+  - 命中分 = max(直接词面 1.0, sim(q,v))；s = Σ idf[w]×命中分（每查询词取最佳词元）；
+  - **预注册 m 定义**：命中分 ≥0.5 的查询词计一个内容词命中；收录线 m≥2/单罕见
+    维持原样；第四轮 bridge_admit 整段删除（代码+开关+测试）；
+  - 查询侧复合顺序（预注册）：词形归一先行（--stem-en 正交保留），对归一形查表；
+    下限 0.3 截断（行降序，首个 <0.3 即停）；
+  - expand_of 两档**旁路**（取舍理由：sim 连续分严格优于 0.6/0.4 固定两档，并存会对
+    同一词对双重计数）；distilled 源别名归一彻底旁路（不灌 lexicon，add_alias_distilled
+    对本资产不用；内置严同义与守卫对其它源不动）。
+- 单测 test_word_sim 28/28：sim 表加载/双向查/无边 0；q19 型（kid 直接 + sim 0.8）
+  进池、无表历史行为、噪声零新增。
+
+### 13.3 L2 逐题 sim 命中链（替代指标）
+
+```
+q19 "What do Melanie's kids like?"
+  D6:6: like~love(0.7)                      ← 单桥，m=1 不达收录线
+  D4:8: kids==kids(1.0) | like~love(0.7)    ← m=2 达线入池
+q22 "Would Caroline likely have Dr. Seuss books…?"
+  D6:9: books==books(1.0)                   ← m=1 不达线（第四轮的图边救回在本轮消失）
+q64 "Would Melanie likely enjoy … Vivaldi?"
+  D15:28: enjoy~like(0.8) | song~music(0.7) ← m=2 达线入池（该金标首次入池）
+```
+
+### 13.4 端到端审判（B = sim 表 + --stem-en，预注册线同口径）
+
+| 运行 | 覆盖率 | Δ vs off（0.448） |
+|---|---|---|
+| SIM #1 / #2 / #3（三次复跑完全一致） | 0.443 | **-0.005** |
+
+- E2E >+0.02：**不过**（-0.005，且 any-hit 25→24）；
+- 救回题数 ≥2：**不过**（0 题；q22 较第四轮回退——RELATED 边/别名随"不灌 lexicon"消失；
+  q19/q64 金标入池但未到 top-k：top4 仍为原通道候选）。
+
+### 13.5 终局结论（用户指定的最后一次，附数据）
+
+五轮完整证据链收敛到同一结论：**词面范式的瓶颈不在"门"（收录门、守卫、两档折扣、
+等价归一，四道全部拆掉过），在"入池≠top-k"**——语义桥候选（ graded sim 0.7-0.8 权重）
+进入了候选池，但融合排序与 BM25 终排不把它们置于金标位置；而能改变 top-k 的机制
+（第四轮 RELATED 图边）收益上限也只有 +0.016（1 题/50）。**词面范式对本 benchmark
+的词级语义承载力上限 ≈ +0.016~0.02 覆盖率（1-2 题/50），graded similarity pivot
+未能突破该上限（-0.005）**。词级语义收益的下一步只能在词面范式之外（向量/推理通道）。
+词库路线（别名归一与 graded sim 两条技术路线）到此终局，不再续投。
+
+### 蓝方自检逐条
+
+1. **多义词 max 语义实测**：✅ bank 类词多条边各带场景分（0.9/0.7/0.6/0.5），
+   max() 取上下文最佳可用边，无双 sense 坍缩。
+2. **sim 表内存规模**：11,120 词 / 53,470 边，嵌套 unordered_map + 行内 vector，
+   估算 <10MB，常驻无压力。
+3. **软匹配阈值下限**：0.3（预注册）。依据：LLM 1-3/10 分（仅弱相关）不触发；
+   分布实测 <0.3 仅 395 边（0.7%），下限主要砍 hub 词（make/run 类 10+ 边）的长尾
+   假阳性；实测三次运行零噪声翻转（仅已知 q32 噪声题）。
+4. **与 expand_of 并存权重冲突**：不并存——sim 表非空即旁路 expand_of 与 near 降级
+   （理由 §13.2）；并存会对同词对双重计数（0.6 档 + sim 分）。
+5. **stem+sim 复合顺序**：查询侧词干先行（normalize(w) 后查表，loves→love 命中
+   love 行）；事件侧 token 原样匹配 tok_best 键（键为词表 lemma 形，事件变化形由
+   sim 行内的变化形条目覆盖，如 like 行含 loves）——两侧不对称但互补，已实测
+   （q19 like~love 链成立）。
+
+### 改动清单（本节）
+
+- `seed/include/.../seed_generator.h` + `seed/src/seed_generator.cpp`：WordSimTable
+  （load/sim/row）+ SeedQuery.word_sim + 软匹配路径（旁路 expand_of/桥介门，
+  历史路径分支保持逐行不变）。
+- `llm/include/.../components.h` + `llm/src/lexicon.cpp`：`score_word_sims`（M3）。
+- `bench/cli/main.cpp`：`--word-sim`、`--score-sims`；删 `--bridge-admit`。
+- `bench/include/.../bench.h` + `bench/src/ingest_answer.cpp`：cfg.word_sim 透传
+  （替 bridge_admit）。
+- `tests/test_seed.cpp`：test_bridge_admit → test_word_sim（28/28）。
+- 新资产：`lexicon/lexicon_en_sim.json`（11,120 词 / 53,470 边）。
+- ctest **20/20 全绿**（10.72s，全量 rebuild）。
+- 运行产物：`bench/runs/lexicon_ab/SIM{1,2,3}.*`、`bench/runs/lexicon_en_sims.log`。
+
+---
+
+## 14. 第六轮（终局架构）：统一 graded 边表——词级语义总审判
+
+> 架构：一张 {word:{word2:score}} 边表，三类边共表（撞词取 max）：
+> ①规则铸边（词形：'s/复数 0.95、过去/进行 0.9，generator 现场铸造）；
+> ②蒸馏边（lexicon_en_sim.json 0.3-1.0）；③反义弱边（antonyms ×0.35）。
+> 消费唯一逻辑：命中分 = max(直接词面 1.0, 最佳边分)；m 按 ≥0.5 计；IDF 照常。
+
+### 14.1 边表统计
+
+- 合并后：**11,119 词 / 66,262 存表边**（蒸馏 53,470 + 反义弱边 12,792；词形边
+  按需铸造不计入）。估算内存 <15MB。
+- 铸边质量实测（edges_of("like") 合并视图 Top8）：like's:0.95 / likes:0.95 /
+  liked:0.90 / liking:0.90（铸边）+ enjoy:0.80 / fancy:0.70 / love:0.70（蒸馏）。
+  **蒸馏行不含 loves/loved（None）——铸边真实补上了第五轮缺的词形覆盖**。
+
+### 14.2 退役清单执行确认
+
+| 项 | 处置 |
+|---|---|
+| normalize 对蒸馏资产的别名改写（add_alias_distilled） | **已删**（函数+调用+测试语义更新）；内置严同义（失眠←睡不着）保留别名表原样（实现更简，未化 1.0 分边——内置表服务中文通道，不动） |
+| --stem-en 查询/写入侧词干改写（en_stem/stem_df_/set_stem_en） | **已删**（keyword_manager 复原纯 lowercase+alias）；词形等价降级为 0.9/0.95 铸边 |
+| 第四轮桥介门 / 第五轮 expand_of 双轨 | 桥介已删（上轮）；expand_of 仅在边表为空的历史路径保留（默认行为逐行不变的必要遗留） |
+
+### 14.3 L2 逐题命中链（三类边共表后）
+
+```
+q19  D6:6: like~love(0.7 蒸馏)                D4:8: kids==kids(1.0) | like~love(0.7)
+q22  D6:9: books==books(1.0)（m=1 不达线，同第五轮）
+q64  D15:28: enjoy~like(0.8) | song~music(0.7)（m=2 入池，同第五轮）
+```
+词形铸边使 loves/loved/likes 全部可达（0.95），但金标题的词面路径不经过这些形——
+链上与第五轮相同。
+
+### 14.4 端到端总审判（B = --word-edges，两次复跑）
+
+| 运行 | 覆盖率 | Δ vs off（0.448） |
+|---|---|---|
+| EDGE #1 | 0.443 | -0.005（q32 噪声翻转） |
+| EDGE #2 | 0.448 | **+0.000**（与 off 逐题全同） |
+
+- E2E >+0.02：**不过**（稳定值 +0.000）；
+- 金标进 top-k ≥2 题 / q19·q64 至少一题：**不过**（0 题；q19/q64 金标入池未达 top-k）；
+- **总审判判决：词级语义总账 <0.02 → 转向量通道的立项依据成立。** 六轮完整证据链
+  （等价归一、守卫放行、词干归一、可互换精筛、graded sim、统一边表）收敛一致：
+  词面范式对词级语义的承载上限 ≈ 第四轮 RELATED 图边的 +0.016，一切词表机制变体
+  （含架构级 pivot）均不能突破。
+
+### 蓝方自检逐条
+
+1. **现场铸边成本**：微基准 200k 次 sim()（含未登录词双向铸边）54.1ms =
+   **0.27µs/次**——查询每词铸边开销可忽略；index 侧按需铸造无预计算成本。
+2. **三类边同表分值冲突**：add_edge 撞词取 max（语义：词形等价 ≥ 蒸馏近义 ≥ 反义弱
+   边的天然排序）；实测 like→loves：蒸馏无此边、铸边 0.95 生效；like→hate：
+   反义 0.35 不与蒸馏 0.80 冲突（单测锁定 max 语义）。
+3. **边表内存**：66,262 边 <15MB，bench 级单例常驻无压力。
+4. **与第五轮 sim-only 差异归因**：三类边中真正的新增覆盖 = 词形铸边（蒸馏行无
+   loves/loved，铸边补上）+ 反义弱边 12,792 条（0.35 < 0.5 下限，从不贡献 m 命中，
+   仅微量加 s）；E2E 结果与第五轮相同（+0.000 vs -0.005，同一噪声带）——归因：
+   金标题的词面路径不经过新增边覆盖的形，且"入池≠top-k"的终排瓶颈未变。
+
+### 改动清单（本节）
+
+- `seed/include/.../seed_generator.h` + `seed/src/seed_generator.cpp`：WordSimTable
+  → **WordEdgeTable**（load 蒸馏边 / load_antonyms 反义弱边 / sim / edges_of /
+  mint_inflections 铸边 generator / add_edge 撞词取 max）；消费端单边表逻辑。
+- `keyword/include+src`：**删** add_alias_distilled、en_stem、stem_df_、set_stem_en、
+  normalize 词干块（复原纯 lowercase+alias）；add_alias 原样保留。
+- `bench/src/lexicon_apply.cpp`：distilled 源不再写别名表（near/ant 边照灌）。
+- `bench/cli/main.cpp`：删 `--stem-en`；`--word-sim` → `--word-edges`（支持
+  sim.json,lexicon.json 逗号双文件）；`--bridge-admit` 已于上轮删除。
+- `tests`：test_keyword 复原 3 项；test_bench 守卫测试更新（distilled 不再改写）；
+  test_seed test_word_sim → **test_word_edges**（含铸边双向/分档/反义/撞词 max，
+  28/28）。
+- ctest **20/20 全绿**（10.79s，退役+重构后全量 rebuild）。
+- 运行产物：`bench/runs/lexicon_ab/EDGE{1,2}.*`。

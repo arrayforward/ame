@@ -2,6 +2,8 @@
  * M5 seed 单元测试：硬种子（uid/关键词）、软种子（ANN 相似度阈值与赋权）、
  * 坐标种子、自由文本种子、合并去重
  */
+#include <fstream>
+
 #include "ame/extractor/extractor.h"
 #include "ame/keyword/keyword_manager.h"
 #include "ame/seed/seed_generator.h"
@@ -183,28 +185,47 @@ static void test_conditional_normalize() {
   CHECK(!has_seed(s4, "ev1"));   // 不经扩展误入
 }
 
-// M1 桥介收录（复活工程第四轮，--bridge-admit）：
-// q19 型：查询含直接词 + 事件含经"词干+别名"全链解析的同义形（loved→love→like），
-// 该形不在 variants 扩展表内（纯桥介）→ 开关关不进池、开关开进池且权重 ×0.5；
-// 无桥噪声事件（归一不改变词形）零新增。stem 护栏需要 love 节点有 CONTAINS 连接。
-static void test_bridge_admit() {
+// 第六轮终局：统一 graded 边表（WordEdgeTable）——蒸馏边 + 反义弱边 + 现场铸词形边。
+// q19 型：kid 直接命中 + like→love 蒸馏边 0.8 → m=2 进池；无表历史行为；噪声零新增。
+static void test_word_edges() {
+  const char* sim_path = "/tmp/ame_test_wordsim.json";
+  {
+    std::ofstream f(sim_path);
+    f << "{\"source\":\"distilled-sim\",\"sims\":{\"like\":{\"love\":0.8}}}";
+  }
+  WordEdgeTable sim;
+  CHECK(sim.load(sim_path));
+  CHECK(sim.word_count() == 1 && sim.edge_count() == 1);
+  CHECK(sim.sim("like", "love") == 0.8f);
+  CHECK(sim.sim("love", "like") == 0.8f);   // 反向退化查找
+  CHECK(sim.sim("like", "hate") == 0.0f);
+  // 现场铸词形边（R2 词干改写的 graded 替代物）：双向可铸、分档 0.95/0.9
+  CHECK(sim.sim("love", "loves") == 0.95f);   // 复数档
+  CHECK(sim.sim("loves", "love") == 0.95f);   // 未登录词现场铸边再查
+  CHECK(sim.sim("hop", "hopped") == 0.9f);    // 过去档（双写还原）
+  CHECK(sim.sim("make", "making") == 0.9f);   // 进行档
+  CHECK(sim.sim("make", "maked") == 0.9f);    // 不规则不处理也不误铸为 1.0
+  CHECK(sim.sim("love", "loving") == 0.9f);
+  // 反义弱边：antonyms 流 ×0.35
+  const char* lex_path = "/tmp/ame_test_lex_ant.json";
+  {
+    std::ofstream f(lex_path);
+    f << "{\"entries\":[{\"word\":\"like\",\"syn_strong\":[],\"syn_near\":[],"
+         "\"antonyms\":[\"hate\"]}]}";
+  }
+  CHECK(sim.load_antonyms(lex_path));
+  CHECK(sim.sim("like", "hate") == 0.35f);    // 反义弱边
+  CHECK(sim.sim("like", "love") == 0.8f);     // 撞词取 max：蒸馏边不被反义边覆盖
+
   Fixture f;
-  // love 节点 + 假事件边（stem_df 护栏）；别名 love→like（R1 蒸馏源语义）
-  std::string love_uid = f.kw.get_or_create("love", "attr");
-  Node ev0;
-  ev0.uid = "ev0"; ev0.kind = NodeKind::Event; ev0.text = "love";
-  f.s.put_node(ev0);
-  f.s.put_edge(Edge{"ev0", love_uid, RelType::CONTAINS, 1.0, {}});
-  f.kw.add_alias("love", "like");
-  f.kw.set_stem_en(true);
   Node ev1, ev2;
   ev1.uid = "ev1"; ev1.kind = NodeKind::Event;
-  ev1.text = "The kid loved the dinosaur exhibit";  // kid 直接 + loved→love→like 桥介
+  ev1.text = "The kid love dinosaurs";      // kid 直接 + love→蒸馏边 0.8
   ev2.uid = "ev2"; ev2.kind = NodeKind::Event;
-  ev2.text = "The weather is nice today";           // 零命中噪声
+  ev2.text = "The weather is nice today";   // 零命中噪声
   f.s.put_node(ev1); f.s.put_node(ev2);
 
-  // 开关关（默认）：单直接词（非罕见）+ 纯桥介 → 历史收录线不放行
+  // 无表（默认）：历史行为——单直接词非罕见 → 不进池
   SeedQuery q0;
   q0.text = "What did the kid like?";
   auto s0 = f.sg.gen_seeds(q0);
@@ -215,22 +236,18 @@ static void test_bridge_admit() {
   }
   CHECK(!f1 && !f2);
 
-  // 开关开：桥介命中使 ev1 进池（权重 = (0.3+0.7·≤0.5)×0.5 ≤ 0.325），ev2 仍排除
+  // 有表：软匹配命中（0.8 ≥0.5 计一个内容词命中）→ m=2 进池，噪声仍排除
   SeedQuery q1;
   q1.text = "What did the kid like?";
-  q1.bridge_admit = true;
+  q1.word_edges = &sim;
   auto s1 = f.sg.gen_seeds(q1);
   bool b1 = false, b2 = false;
   for (auto& sd : s1) {
-    if (sd.node_uid == "ev1") {
-      b1 = true;
-      CHECK(sd.source == "lex");
-      CHECK(sd.weight > 0.0 && sd.weight <= 0.33);
-    }
+    if (sd.node_uid == "ev1") { b1 = true; CHECK(sd.source == "lex"); }
     if (sd.node_uid == "ev2") b2 = true;
   }
   CHECK(b1);
-  CHECK(!b2);  // 无桥噪声场景零新增
+  CHECK(!b2);
 }
 
 int main() {
@@ -240,6 +257,6 @@ int main() {
   test_merge_dedup();
   test_lex_seeds();
   test_conditional_normalize();
-  test_bridge_admit();
+  test_word_edges();
   return AME_TEST_REPORT();
 }

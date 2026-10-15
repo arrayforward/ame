@@ -404,4 +404,159 @@ int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
   (void)src_entry;
   return total_pairs;
 }
+
+// 复活工程第五轮 M3：词级近似连续打分（graded similarity 蒸馏）。
+// score_word_sims 伪代码：
+//   步骤1：读 in_path（蒸馏词库），对每个 word 取其 strong ∪ near 候选并集（去重）；
+//   步骤2：按 batch 对分批，prompt 要求对每个 "A|B" 打 1-10 分（10=同义可互换，
+//         7-9=高度近义常可替换，4-6=相关但多数场景不可替换，1-3=仅弱相关）；
+//   步骤3：chat_batch 并发 + 失败批重试一次；仍失败该批 fail-open 记 5 分（中性）；
+//   步骤4：每 chunk 合并写 out（{"source":"distilled-sim","sims":{w:{v:score/10}}}），
+//         断点续跑（按 word 跳过已完成）；返回 pair 总数。
+int score_word_sims(ILlmClient& client, const std::string& in_path,
+                    const std::string& out_path, int batch, int concurrency) {
+  std::ifstream fi(in_path);
+  if (!fi) return -1;
+  std::stringstream ss;
+  ss << fi.rdbuf();
+  bool ok = false;
+  Json root = Json::parse(ss.str(), &ok);
+  if (!ok) return -1;
+  const Json* entries = root.find("entries");
+  if (!entries) return -1;
+
+  // 已完成 word 集合（断点续跑）：out 的 sims 键
+  std::unordered_set<std::string> done;
+  Json sims_out = Json::object();
+  {
+    std::ifstream fo(out_path);
+    if (fo) {
+      std::stringstream ss2;
+      ss2 << fo.rdbuf();
+      bool ok2 = false;
+      Json old = Json::parse(ss2.str(), &ok2);
+      if (ok2) {
+        const Json* s = old.find("sims");
+        if (s && s->kind == Json::Obj) {
+          sims_out = *s;
+          for (auto& [w, r] : s->obj) done.insert(w);
+        }
+      }
+    }
+  }
+
+  struct PairItem {
+    std::string word, b;
+  };
+  std::vector<PairItem> pending;
+  for (auto& e : entries->arr) {
+    const Json* w = e.find("word");
+    if (!w || w->as_str().empty() || done.count(w->as_str())) continue;
+    std::unordered_set<std::string> seen;
+    const Json* strong = e.find("syn_strong");
+    if (strong)
+      for (auto& s : strong->arr)
+        if (!s.as_str().empty() && seen.insert(s.as_str()).second)
+          pending.push_back({w->as_str(), s.as_str()});
+    const Json* near = e.find("syn_near");
+    if (near)
+      for (auto& r : near->arr) {
+        const Json* rw = r.find("word");
+        if (rw && !rw->as_str().empty() && seen.insert(rw->as_str()).second)
+          pending.push_back({w->as_str(), rw->as_str()});
+      }
+  }
+  const int total_pairs = (int)pending.size();
+  AME_LOGI("score-sims: 目标 pair %zu（已完成 word %zu），批大小 %d", pending.size(),
+           done.size(), batch);
+  if (pending.empty()) return 0;
+
+  std::unordered_map<std::string, std::unordered_map<std::string, double>> scores;
+  int failed_batches = 0;
+  for (size_t c0 = 0; c0 < pending.size(); c0 += (size_t)batch * 100) {
+    size_t c1 = std::min(c0 + (size_t)batch * 100, pending.size());
+    std::vector<ChatRequest> reqs;
+    std::vector<std::pair<size_t, size_t>> req_span;
+    for (size_t i = c0; i < c1; i += (size_t)batch) {
+      size_t j = std::min(i + (size_t)batch, c1);
+      std::string user =
+          "Rate semantic similarity of each pair A|B for conversational English on a "
+          "1-10 scale (10=interchangeable synonyms, 7-9=highly similar usually "
+          "replaceable, 4-6=related but usually not replaceable, 1-3=weakly related). "
+          "Reply with a JSON array only: [{\"a\":A,\"b\":B,\"score\":N},...] covering "
+          "every pair in order.\nPairs:\n";
+      for (size_t k = i; k < j; ++k) user += pending[k].word + "|" + pending[k].b + "\n";
+      ChatOptions o;
+      o.json = true;
+      o.max_tokens = 4096;
+      reqs.push_back({{{"system", "你是严格的语义近似评分器，只输出 JSON。"}, {"user", user}}, o});
+      req_span.emplace_back(i, j);
+    }
+    auto resps = client.chat_batch(reqs, concurrency);
+    std::vector<int> retry_idx;
+    for (size_t i = 0; i < resps.size(); ++i)
+      if (resps[i].empty()) retry_idx.push_back((int)i);
+    if (!retry_idx.empty()) {
+      std::vector<ChatRequest> r2;
+      for (int i : retry_idx) r2.push_back(reqs[i]);
+      auto res2 = client.chat_batch(r2, concurrency);
+      for (size_t k = 0; k < retry_idx.size(); ++k) resps[retry_idx[k]] = res2[k];
+    }
+    for (size_t i = 0; i < resps.size(); ++i) {
+      size_t a = req_span[i].first, b = req_span[i].second;
+      size_t p1 = resps[i].find('['), p2 = resps[i].rfind(']');
+      bool parsed = false;
+      if (p1 != std::string::npos && p2 > p1) {
+        bool ok2 = false;
+        Json arr = Json::parse(resps[i].substr(p1, p2 - p1 + 1), &ok2);
+        if (ok2 && arr.kind == Json::Arr) {
+          std::unordered_map<std::string, double> got;
+          for (auto& v : arr.arr) {
+            const Json* ja = v.find("a");
+            const Json* jb = v.find("b");
+            const Json* js = v.find("score");
+            if (!ja || !jb || !js) continue;
+            got[ja->as_str() + "|" + jb->as_str()] = js->as_num(5.0);
+          }
+          parsed = true;
+          for (size_t k = a; k < b; ++k) {
+            auto it = got.find(pending[k].word + "|" + pending[k].b);
+            // 宽松回退：按序对位（LLM 偶尔改写 key）
+            double sc = (it != got.end())
+                            ? it->second
+                            : (got.count(pending[k].b) ? got[pending[k].b] : 5.0);
+            scores[pending[k].word][pending[k].b] = sc;
+          }
+        }
+      }
+      if (!parsed) {
+        ++failed_batches;
+        for (size_t k = a; k < b; ++k) scores[pending[k].word][pending[k].b] = 5.0;
+      }
+    }
+    // 本 chunk 的 word 落盘
+    std::unordered_set<std::string> touched;
+    for (size_t k = c0; k < c1; ++k) touched.insert(pending[k].word);
+    for (auto& [w, m] : scores) {
+      if (!touched.count(w) || done.count(w)) continue;
+      Json row = Json::object();
+      for (auto& [v, sc10] : m) row[v] = Json::number(sc10 / 10.0);
+      sims_out[w] = std::move(row);
+      done.insert(w);
+    }
+    Json out = Json::object();
+    out["source"] = Json::string("distilled-sim");
+    out["sims"] = sims_out;
+    std::ofstream wf(out_path + ".tmp", std::ios::binary | std::ios::trunc);
+    wf << out.dump();
+    wf.close();
+    std::remove(out_path.c_str());
+    std::rename((out_path + ".tmp").c_str(), out_path.c_str());
+    AME_LOGI("score-sims: 进度 %zu/%zu pair（失败批 %d）", c1, pending.size(),
+             failed_batches);
+  }
+  AME_LOGI("score-sims: 完成 pair %d，失败批 %d（fail-open 记 5 分）", total_pairs,
+           failed_batches);
+  return total_pairs;
+}
 }  // namespace ame

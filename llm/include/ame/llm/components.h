@@ -106,4 +106,9 @@ int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab
 int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
                           const std::string& out_path, int batch, int concurrency);
 
+// 复活工程第五轮 M3：词级近似连续打分（1-10 → /10），候选=输入词库 strong∪near
+// 并集；产出 {"source":"distilled-sim","sims":{w:{v:score}}}；断点续跑。
+int score_word_sims(ILlmClient& client, const std::string& in_path,
+                    const std::string& out_path, int batch, int concurrency);
+
 }  // namespace ame

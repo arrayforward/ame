@@ -26,9 +26,8 @@ namespace ame {
 //   步骤4：antonyms → 双方节点存在 → REL_OPPOSITE 边（core 系数 0.5，最低传导，
 //         扩散中不会被当强联想）；
 //   步骤5：返回灌入条目数（applied 出参）。
-// 源区分（复活工程 R1）：root 带 "source":"distilled" 的蒸馏产物，syn_strong 全量
-//   走 add_alias_distilled 入表（canonical=词条主词；防互换成环在 M3 登记处兜），
-//   修口语高频桥（like→love，同义词也是主词）被 alias_ok 守卫吃掉的问题；
+// 源区分（复活工程 R1 → 第六轮修订）：root 带 "source":"distilled"（或 distilled-sim）
+//   的蒸馏产物不再写别名表（graded 边表替代等价归一，见 §14 退役清单）；
 //   无 source 字段的源（wordnet/中文）维持 alias_ok 守卫，行为逐比特不变。
 Err apply_lexicon(Engine& engine, const std::string& path, int* applied) {
   std::ifstream f(path);
@@ -66,23 +65,17 @@ Err apply_lexicon(Engine& engine, const std::string& path, int* applied) {
     if (!w || w->as_str().empty()) continue;
     std::string word = w->as_str();
     // 同义 → 别名归并（syn_strong，兼容旧版 synonyms 字段）：
-    // 蒸馏源全量入表（canonical=主词）；其余源维持双向守卫（防多义词互指稀释）
+    // 蒸馏源（source=distilled / distilled-sim）第六轮起彻底旁路等价归一——词级语义
+    // 走 WordEdgeTable 的 graded 边（--word-edges），不再写死别名改写；其余源维持
+    // 双向守卫（防多义词互指稀释）。near/antonyms 两类边照灌（图扩散消费）。
     const Json* strong = e.find("syn_strong");
     if (!strong) strong = e.find("synonyms");
-    if (strong)
-      for (auto& s : strong->arr) {
-        if (s.as_str().empty()) continue;
-        bool in;
-        if (distilled) {
-          in = engine.keywords().add_alias_distilled(s.as_str(), word);
-        } else if (alias_ok(word, s.as_str())) {
+    if (strong && !distilled)
+      for (auto& s : strong->arr)
+        if (!s.as_str().empty() && alias_ok(word, s.as_str())) {
           engine.keywords().add_alias(s.as_str(), word);
-          in = true;
-        } else {
-          in = false;
+          ++n;
         }
-        if (in) ++n;
-      }
     // 近义 → REL_SIMILAR 边（保留双节点；score>0.6、≤8 条）；
     // 同时登记近义词表（供条件归一降级扩展，不要求节点存在）
     const Json* near = e.find("syn_near");

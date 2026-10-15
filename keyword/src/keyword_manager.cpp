@@ -58,108 +58,16 @@ KeywordManager::KeywordManager(Storage& storage) : storage_(storage) {
                 "都", "而", "及", "与", "着", "或", "一个", "没有", "是", "很"};
 }
 
-// 英文保守词干（R2）：对纯 ASCII 小写词按序产出候选词干（优先级从高到低），
-// 调用方逐个用 df 护栏试。保守原则：只处理英语高频屈折（所有格/复数/过去式/进行时），
-// 每条规则带长度下限，不做 e-还原（made→mak 类过度截取靠"不做"避免），
-// 双写尾字母只还原一次（hopped→hop）。
-// ses 尾歧义（senses=sense+s / buses=bus+es）给两个候选按优先级试。
-static std::vector<std::string> en_stem(const std::string& w) {
-  std::vector<std::string> out;
-  if (w.size() < 4) return out;
-  auto ends = [&](const char* suf) {
-    size_t n = std::strlen(suf);
-    return w.size() > n && w.compare(w.size() - n, n, suf) == 0;
-  };
-  auto push = [&](std::string base) {
-    if (base.size() >= 3 && base != w &&
-        std::find(out.begin(), out.end(), base) == out.end())
-      out.push_back(std::move(base));
-  };
-  // 所有格 's
-  if (ends("'s")) push(w.substr(0, w.size() - 2));
-  // 复数 ies→y（stories→story）
-  if (w.size() > 4 && ends("ies")) push(w.substr(0, w.size() - 3) + "y");
-  // 过去式 ied→y（tried→try）
-  if (w.size() > 4 && ends("ied")) push(w.substr(0, w.size() - 3) + "y");
-  // 过去式：e+d 只去 d（loved→love、moved→move；made 不以 d 结尾不受影响）
-  if (w.size() > 4 && ends("ed") && w[w.size() - 2] == 'e') push(w.substr(0, w.size() - 1));
-  // 过去式：去 ed + 双写还原（hopped→hopp→hop、played→play）
-  if (w.size() > 4 && ends("ed")) {
-    std::string base = w.substr(0, w.size() - 2);
-    if (base.size() >= 4 && base[base.size() - 1] == base[base.size() - 2] &&
-        base[base.size() - 1] != 'e' && base[base.size() - 1] != 'y')
-      base.pop_back();
-    push(std::move(base));
-  }
-  // 进行时：去 ing + 双写还原（running→runn→run；loving→lov 交 df 护栏拒收）
-  if (w.size() > 5 && ends("ing")) {
-    std::string base = w.substr(0, w.size() - 3);
-    if (base.size() >= 4 && base[base.size() - 1] == base[base.size() - 2] &&
-        base[base.size() - 1] != 'e' && base[base.size() - 1] != 'y')
-      base.pop_back();
-    push(std::move(base));
-  }
-  // 复数 ses：歧义尾，先试 去 s（senses→sense）再试 去 es（buses→bus）
-  if (w.size() > 4 && ends("ses")) {
-    push(w.substr(0, w.size() - 1));
-    push(w.substr(0, w.size() - 2));
-  }
-  // 复数 xes/zes/ches/shes→去 es（boxes→box、wishes→wish）
-  if (w.size() > 4 &&
-      (ends("xes") || ends("zes") || ends("ches") || ends("shes")))
-    push(w.substr(0, w.size() - 2));
-  // 复数：去 s（loves→love、politics→politic；ss/us/is 尾不动）
-  if (w.size() > 3 && ends("s") && !ends("ss") && !ends("us") && !ends("is"))
-    push(w.substr(0, w.size() - 1));
-  return out;
-}
-
-// 词干 df 护栏：词干对应的关键词节点在图中有 CONTAINS 连接（df>0）才认可归一，
-// 防过度截取（senses→sens 因 sens 无节点而拒收）。成本为一次节点查找 + 邻边扫描。
-int KeywordManager::stem_df_(const std::string& stem) const {
-  const Node* n = find(stem);
-  if (!n) return 0;
-  int df = 0;
-  for (auto& [e, nb] : storage_.neighbors(n->uid, {RelType::CONTAINS}))
-    if (nb->kind == NodeKind::Event) ++df;
-  return df;
-}
-
 // 归一化：ASCII 统一小写（查询侧与写入侧词形对齐的通用规则，中文不受影响），
 //   再查别名表，命中返回标准词，未命中返回小写化结果。
-//   R2（stem_en_ 开启时）：别名未命中的纯 ASCII 词再试保守词干，词干通过 df 护栏
-//   则归一到词干（或其别名标准词）。默认关闭 = 历史行为逐行不变。
+//   注（第六轮终局）：英文词形等价不再走 normalize 改写（R2 词干已退役），降级为
+//   WordEdgeTable 的 0.9/0.95 分铸边（seed 模块，graded 软匹配消费）。
 std::string KeywordManager::normalize(const std::string& word) const {
   std::string low;
   low.reserve(word.size());
-  bool ascii_alpha = !word.empty();
-  for (unsigned char c : word) {
-    low += (char)(c < 128 ? std::tolower(c) : c);
-    if (c >= 128 || !(std::isalnum(c) || c == '\'')) ascii_alpha = false;
-  }
+  for (unsigned char c : word) low += (char)(c < 128 ? std::tolower(c) : c);
   auto it = alias_.find(low);
-  if (it != alias_.end()) return it->second;
-  if (stem_en_ && ascii_alpha) {
-    for (auto& st : en_stem(low)) {
-      if (stem_df_(st) > 0) {
-        auto jt = alias_.find(st);
-        return jt != alias_.end() ? jt->second : st;
-      }
-    }
-  }
-  return low;
-}
-
-// 蒸馏源专用别名登记：同 add_alias，另防双向互指成环——standard 当前已归一到
-// alias（alias<->standard 互换）时拒绝登记。normalize 为单跳别名查找，更长的链
-// 在归一语义下惰性（不产生查找环），故只需防两两互换。
-bool KeywordManager::add_alias_distilled(const std::string& alias, const std::string& standard) {
-  if (alias == standard) return false;
-  if (builtin_standards_.count(alias)) return false;  // 内置标准词不可改写
-  auto it = alias_.find(standard);
-  if (it != alias_.end() && it->second == alias) return false;  // 防互换成环
-  alias_[alias] = standard;
-  return true;
+  return it != alias_.end() ? it->second : low;
 }
 
 // 动态注册一条别名映射（alias -> standard）。

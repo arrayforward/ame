@@ -479,7 +479,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
   sq.soft_topk = cfg.k > 5 ? cfg.k : 8;
   sq.lex_topk = cfg.k_pool / 2;  // 词法通道配额：候选池的一半
   sq.conditional_normalize = cfg.conditional_normalize;
-  sq.bridge_admit = cfg.bridge_admit;  // M1 桥介收录（--bridge-admit，默认关）
+  sq.word_edges = cfg.word_edges;  // 第六轮：非空走统一边表软匹配（默认空 = 历史行为）
 
   RecallFilters filters;
   if (qdate > 0) {
