@@ -150,7 +150,7 @@ TimePoint parse_session_date(const std::string& s, TimePoint fallback) {
 // load_locomo 伪代码：
 //   步骤1：解析顶层列表；逐样本取 conversation 对象；
 //   步骤2：按 session_N 顺序收集会话（date 取 session_N_date_time），
-//          每轮映射 {speaker,text,dia_id}；
+//          每轮映射 {speaker,text,dia_id}；可选 tags 数组以 " [tags: ...]" 附入 text；
 //   步骤3：qa 列表逐条映射 {question,answer,category(不透明整数),evidence(dia_id 列表)}；
 //   步骤4：字段缺失用默认值、结构异常跳过该条。
 std::vector<BenchCase> load_locomo(const std::string& path) {
@@ -179,6 +179,22 @@ std::vector<BenchCase> load_locomo(const std::string& path) {
           t.speaker = jstr(&turn, "speaker");
           t.text = jstr(&turn, "text");
           t.dia_id = jstr(&turn, "dia_id");
+          // 写时语义增强（write-time enrichment spike）：轮内可选 "tags"（字符串数组，
+          // enrich_corpus.py 离线产出）→ 以 " [tags: ...]" 附于 text 末尾。挂载理由：
+          // 词法通道与终排 BM25 都按事件文本切词，附在文尾即天然命中，引擎核心零改动；
+          // 代价是标签词参与 BM25 计分（干扰风险 spike 内接受，见
+          // docs/reports/write_time_enrichment.md 蓝方项）；若 spike 转正应改为
+          // 事件 attr 专用标签通道（仅查询扩展侧使用，不进内容分）。
+          const Json* tags = turn.find("tags");
+          if (tags && tags->kind == Json::Arr) {
+            std::string extra;
+            for (auto& tg : tags->arr) {
+              std::string s = tg.as_str();
+              if (s.empty()) continue;
+              extra += (extra.empty() ? "" : ", ") + s;
+            }
+            if (!extra.empty()) t.text += " [tags: " + extra + "]";
+          }
           if (!t.text.empty()) bs.turns.push_back(std::move(t));
         }
         c.sessions.push_back(std::move(bs));
