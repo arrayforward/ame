@@ -46,11 +46,16 @@ bool replaced_by_candidate(Engine& engine, const Node* ev, TimePoint qdate,
 }
 
 // build_pool：复刻 answer() 的大候选池（融合排序输出序；不做 BM25 终排截断）。
-// 同时返回 BM25 终排序名次（content_scores_for_texts，store.h 导出，与终排同公式）。
+// 同时返回 BM25 终排序名次（content_scores_for_texts，store.h 导出，与终排同公式）
+// 与引擎现成信号特征（融合/图/语境/时间分、事件 ts）——便宜近似监督用。
 struct PoolItem {
   std::string dia_id;
   std::string text;
-  int bm25_rank = 0;  // 1 基；0 = 未参与（不可能，池非空时全参与）
+  int bm25_rank = 0;    // 1 基；0 = 未参与（不可能，池非空时全参与）
+  double bm25 = 0;      // 内容词 BM25-lite 得分（终排键）
+  double fusion = 0;    // ScoredEvent.score（M7 融合分）
+  double graph = 0, ctx = 0, time = 0;  // 融合分量
+  double ts = 0;        // 事件时间戳（recency 特征原料）
 };
 
 std::vector<PoolItem> build_pool(Engine& e, const BenchQuestion& q, const BenchConfig& cfg) {
@@ -100,6 +105,12 @@ std::vector<PoolItem> build_pool(Engine& e, const BenchQuestion& q, const BenchC
     it.dia_id = dit != evs[i]->event->attrs.end() ? dit->second : "";
     it.text = evs[i]->event->text;
     it.bm25_rank = bm25_rank[i];
+    it.bm25 = cs[i];
+    it.fusion = evs[i]->score;
+    it.graph = evs[i]->graph_score;
+    it.ctx = evs[i]->context_score;
+    it.time = evs[i]->time_score;
+    it.ts = (double)evs[i]->event->ts;
     out.push_back(std::move(it));
   }
   return out;
@@ -163,6 +174,12 @@ Json pool_json(const std::vector<PoolItem>& pool) {
     Json j = Json::object();
     j["dia_id"] = Json::string(it.dia_id);
     j["bm25_rank"] = Json::number((double)it.bm25_rank);
+    j["bm25"] = Json::number(it.bm25);
+    j["fusion"] = Json::number(it.fusion);
+    j["graph"] = Json::number(it.graph);
+    j["ctx"] = Json::number(it.ctx);
+    j["time"] = Json::number(it.time);
+    j["ts"] = Json::number(it.ts);
     j["text"] = Json::string(it.text);
     arr.push(std::move(j));
   }
@@ -189,6 +206,10 @@ int main(int argc, char** argv) {
     for (auto* s : kAClass) targets.push_back(s);
   if (mode == "pools")
     for (auto* s : kNearMiss) targets.push_back(s);
+  if (mode == "pools50") {  // 便宜近似监督：sample50 全部 50 题的标准池特征导出
+    auto all = load_qids("bench/data/locomo_sample50.json");
+    targets.insert(targets.end(), all.begin(), all.end());
+  }
   if (mode == "e2")
     for (auto* s : kAClass) targets.push_back(s);
 
@@ -216,7 +237,7 @@ int main(int argc, char** argv) {
     for (auto& g : q.evidence_dia_ids) gold.push(Json::string(g));
     rec["gold"] = std::move(gold);
 
-    if (mode == "pools") {
+    if (mode == "pools" || mode == "pools50") {
       rec["pool"] = pool_json(build_pool(e, q, cfg));
     } else if (mode == "e1") {
       auto pool = build_pool(e, q, cfg);

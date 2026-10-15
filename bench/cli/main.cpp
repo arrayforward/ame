@@ -63,6 +63,8 @@ struct Cli {
   int llm_rerank = 0;          // --llm-rerank N：句级语义 LLM 重排名额（0=关，默认 20 实验值）
   bool llm_rerank_all = false; // --llm-rerank-all on|off：重排窗口扩为全池（默认关）
   double entity_pass = -1.0;   // --entity-pass-threshold X：实体通道低置信放行（<0=关=现状）
+  double rerank_guard = -1.0;  // --rerank-guard X：BM25 强命中豁免 LLM 重排（<0=关=现状）
+  std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -119,6 +121,8 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--llm-rerank") cli.llm_rerank = std::atoi(next().c_str());
     else if (a == "--llm-rerank-all") cli.llm_rerank_all = true;  // 裸开关（默认关）
     else if (a == "--entity-pass-threshold") cli.entity_pass = std::atof(next().c_str());
+    else if (a == "--rerank-guard") cli.rerank_guard = std::atof(next().c_str());
+    else if (a == "--cheap-rerank") cli.cheap_rerank = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -171,6 +175,10 @@ void usage() {
                "      [--llm-rerank-all]（graph：重排窗口扩为全池 k_pool，裸开关默认关）\n"
                "      [--entity-pass-threshold X]（graph：实体档案通道低置信放行——通道榜首\n"
                "       内容分 < X 时候选并入标准管道池；默认 -1=关=现状；建议实验值 0.5）\n"
+               "      [--rerank-guard X]（graph：LLM 重排时 BM25 榜首内容分 ≥ X 则豁免、\n"
+               "       保底 top-k 首槽；默认 -1=关；建议实验值 0.8）\n"
+               "      [--cheap-rerank PATH]（graph：特征逻辑重排器替代 LLM 打分，零 LLM；\n"
+               "       模型由 cheap_rerank_train.py 训练；默认空=关）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -182,6 +190,8 @@ int main(int argc, char** argv) {
   cli.cfg.llm_rerank = cli.llm_rerank;  // --llm-rerank N → BenchConfig（0=关）
   cli.cfg.llm_rerank_all = cli.llm_rerank_all;      // --llm-rerank-all（默认关）
   cli.cfg.entity_pass_threshold = cli.entity_pass;  // --entity-pass-threshold（默认 -1=现状）
+  cli.cfg.rerank_guard = cli.rerank_guard;          // --rerank-guard（默认 -1=关）
+  cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
 
   // 词典构建模式：--build-lexicon <vocab_freq.json> [--lexicon-out PATH] [--lexicon-topn N]
   if (!cli.build_lexicon.empty()) {
@@ -325,6 +335,8 @@ int main(int argc, char** argv) {
     mark("llm-rerank", cli.llm_rerank > 0);
     mark("llm-rerank-all", cli.llm_rerank_all);
     mark("entity-pass-threshold", cli.entity_pass >= 0.0);
+    mark("rerank-guard", cli.rerank_guard >= 0.0);
+    mark("cheap-rerank", !cli.cheap_rerank.empty());
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);

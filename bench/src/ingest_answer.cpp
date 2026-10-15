@@ -12,6 +12,7 @@
 #include "ame/bench/bench.h"
 #include "ame/bench/store.h"
 
+#include "ame/core/json.h"
 #include "ame/engine/engine.h"
 #include "ame/extractor/extractor.h"
 #include "ame/llm/llm.h"
@@ -22,6 +23,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -151,6 +154,110 @@ static std::vector<double> content_scores(const std::string& question,
   for (size_t i = 0; i < cands.size(); ++i)
     if (cands[i]) texts[i] = cands[i]->text;
   return content_scores_for_texts(question, texts);
+}
+
+// ---- 便宜近似 v1：特征逻辑重排器（零 LLM 推理；训练见 cheap_rerank_train.py）----
+// 模型 JSON：{"features": [名...], "weights": [w...], "bias": b}。特征口径与
+// 训练脚本逐一对齐（bm25 / bm25_rank / fusion / graph / ctx / time /
+// fusion_rank / is_entity / recency / bm25_share，minmax 均在题内池上归一）。
+struct CheapModel {
+  std::vector<std::string> features;
+  std::vector<double> weights;
+  double bias = 0;
+  bool ok = false;
+};
+
+// load_cheap_model：按路径缓存加载（bench 单线程；失败返回 ok=false → 调用方降级）
+static const CheapModel& load_cheap_model(const std::string& path) {
+  static std::unordered_map<std::string, CheapModel> cache;
+  auto it = cache.find(path);
+  if (it != cache.end()) return it->second;
+  CheapModel m;
+  std::ifstream f(path);
+  if (f) {
+    std::stringstream ss;
+    ss << f.rdbuf();
+    bool ok = false;
+    Json j = Json::parse(ss.str(), &ok);
+    if (ok && j.kind == Json::Obj) {
+      const Json* feats = j.find("features");
+      const Json* wts = j.find("weights");
+      const Json* bs = j.find("bias");
+      if (feats && feats->kind == Json::Arr && wts && wts->kind == Json::Arr) {
+        for (auto& feat : feats->arr) m.features.push_back(feat.as_str());
+        for (auto& wv : wts->arr) m.weights.push_back(wv.as_num());
+        m.bias = bs ? bs->as_num() : 0.0;
+        m.ok = m.features.size() == m.weights.size() && !m.features.empty();
+      }
+    }
+  }
+  return cache.emplace(path, std::move(m)).first->second;
+}
+
+// cheap_score_pool：对 BM25 终排后的全池逐候选算特征并打分，返回 0 基下标
+// 降序（模型序）。特征归一全部题内 minmax（与训练脚本同口径）；is_entity 由
+// 调用方传入的通道候选 uid 集合给出（训练数据该特征恒 0，模型权重≈0 安全外推）。
+static std::vector<size_t> cheap_score_pool(const CheapModel& m,
+                                            const std::vector<const ScoredEvent*>& evs,
+                                            const std::vector<double>& cs,
+                                            const std::unordered_set<std::string>& entity_uids) {
+  size_t n = evs.size();
+  auto minmax = [&](double v, double lo, double hi) { return hi > lo ? (v - lo) / (hi - lo) : 0.0; };
+  std::vector<double> fus(n), gra(n), ctx(n), tim(n), rec(n);
+  double f_lo = 0, f_hi = 0, g_lo = 0, g_hi = 0, c_lo = 0, c_hi = 0, t_lo = 0, t_hi = 0,
+         r_lo = 0, r_hi = 0, bm_max = 0;
+  for (size_t i = 0; i < n; ++i) {
+    fus[i] = evs[i]->score;
+    gra[i] = evs[i]->graph_score;
+    ctx[i] = evs[i]->context_score;
+    tim[i] = evs[i]->time_score;
+    rec[i] = -(double)evs[i]->event->ts;
+    bm_max = std::max(bm_max, cs[i]);
+  }
+  auto span = [&](const std::vector<double>& v, double& lo, double& hi) {
+    lo = hi = v[0];
+    for (double x : v) { lo = std::min(lo, x); hi = std::max(hi, x); }
+  };
+  span(fus, f_lo, f_hi);
+  span(gra, g_lo, g_hi);
+  span(ctx, c_lo, c_hi);
+  span(tim, t_lo, t_hi);
+  span(rec, r_lo, r_hi);
+  // 排名特征：BM25 序（cs 降序，stable 与训练一致）与融合分降序
+  std::vector<size_t> ord_bm(n), ord_fu(n);
+  for (size_t i = 0; i < n; ++i) ord_bm[i] = ord_fu[i] = i;
+  std::stable_sort(ord_bm.begin(), ord_bm.end(), [&](size_t a, size_t b) { return cs[a] > cs[b]; });
+  std::stable_sort(ord_fu.begin(), ord_fu.end(), [&](size_t a, size_t b) { return fus[a] > fus[b]; });
+  std::vector<double> rank_bm(n), rank_fu(n);
+  for (size_t r = 0; r < n; ++r) {
+    rank_bm[ord_bm[r]] = 1.0 - (double)r / (double)(n - 1);
+    rank_fu[ord_fu[r]] = 1.0 - (double)r / (double)(n - 1);
+  }
+  if (bm_max <= 0) bm_max = 1.0;
+  std::vector<std::pair<double, size_t>> scored(n);
+  for (size_t i = 0; i < n; ++i) {
+    std::unordered_map<std::string, double> x = {
+        {"bm25", cs[i]},
+        {"bm25_rank", rank_bm[i]},
+        {"fusion", minmax(fus[i], f_lo, f_hi)},
+        {"graph", minmax(gra[i], g_lo, g_hi)},
+        {"ctx", minmax(ctx[i], c_lo, c_hi)},
+        {"time", minmax(tim[i], t_lo, t_hi)},
+        {"fusion_rank", rank_fu[i]},
+        {"is_entity", entity_uids.count(evs[i]->event->uid) ? 1.0 : 0.0},
+        {"recency", minmax(rec[i], r_lo, r_hi)},
+        {"bm25_share", cs[i] / bm_max},
+    };
+    double z = m.bias;
+    for (size_t k = 0; k < m.features.size(); ++k) z += m.weights[k] * x[m.features[k]];
+    double s = 1.0 / (1.0 + std::exp(-std::max(-30.0, std::min(30.0, z))));
+    scored[i] = {s, i};
+  }
+  std::stable_sort(scored.begin(), scored.end(),
+                   [](auto& a, auto& b) { return a.first > b.first; });
+  std::vector<size_t> out;
+  for (auto& [s, i] : scored) out.push_back(i);
+  return out;
 }
 
 // parse_llm_rerank_ids 实现（容错解析，语义见 bench.h 声明）：
@@ -669,10 +776,56 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
     for (size_t i : ord) reranked.push_back(evs[i]);
     evs = std::move(reranked);
     top_content = cs[ord.front()];
+    // cs 与重排后 evs 重新对齐（便宜近似特征按下标取 bm25；LLM 路径不用 cs 逐候选，无此问题）
+    {
+      std::vector<double> csr(evs.size());
+      for (size_t r = 0; r < ord.size(); ++r) csr[r] = cs[ord[r]];
+      cs = std::move(csr);
+    }
+    // BM25 强命中豁免（--rerank-guard，默认 -1=关）：榜首内容词分数 ≥ 阈值时
+    // 记住榜首 uid，LLM 重排后保底首槽（q100 型假阳性防护）。
+    const Node* guard_top = (cfg.rerank_guard >= 0.0 && top_content >= cfg.rerank_guard)
+                                ? evs.front()->event
+                                : nullptr;
+    // 重排选中通用执行：sel = 池内 0 基下标（选中序，≤k 个）→ 置顶 + 其余 BM25
+    // 原序补齐 + 强命中豁免保底首槽。LLM 与便宜近似两路共用。返回选中 dia 串（调用方记日志）。
+    auto apply_selection = [&](const std::vector<size_t>& sel) -> std::string {
+      std::vector<char> used(evs.size(), 0);
+      std::vector<const ScoredEvent*> rr;
+      std::string sel_dias;
+      for (size_t s : sel) {
+        rr.push_back(evs[s]);
+        used[s] = 1;
+        auto it = evs[s]->event->attrs.find("dia_id");
+        sel_dias += (sel_dias.empty() ? "" : ",") +
+                    (it != evs[s]->event->attrs.end() ? it->second : "-");
+      }
+      for (size_t i = 0; i < evs.size(); ++i)
+        if (!used[i]) rr.push_back(evs[i]);
+      evs = std::move(rr);
+      // 豁免执行：BM25 强命中榜首未在首槽 → 前置保底（不丢选中项，仅整体
+      // 后移一位；选中榜首时无操作）。
+      if (guard_top && evs.front()->event != guard_top) {
+        for (size_t i = 1; i < evs.size(); ++i) {
+          if (evs[i]->event == guard_top) {
+            const ScoredEvent* pin = evs[i];
+            evs.erase(evs.begin() + i);
+            evs.insert(evs.begin(), pin);
+            break;
+          }
+        }
+        auto it = guard_top->attrs.find("dia_id");
+        std::fprintf(stderr, "  [rerank-guard] %s: BM25 榜首 %s（%.3f≥%.2f）豁免，保底首槽\n",
+                     q.id.c_str(),
+                     it != guard_top->attrs.end() ? it->second.c_str() : "-",
+                     top_content, cfg.rerank_guard);
+      }
+      return sel_dias;
+    };
     // 句级语义 spike：LLM 重排（--llm-rerank N / --llm-rerank-all）——BM25 终排后、
     // 截 top-k 之前，取前 N 条（--llm-rerank-all 时全池）送一次 LLM 调用按句级
     // 相关度重选（其前 k 置顶，其余 BM25 原序补齐）。失败/无有效编号 → 优雅降级
-    // BM25 原序（日志标注）；两者皆关 = 本段不执行。
+    // BM25 原序（日志标注）；LLM 与便宜近似皆关 = 本段不执行。
     if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) {
       size_t n = cfg.llm_rerank_all ? evs.size()
                                     : std::min<size_t>((size_t)cfg.llm_rerank, evs.size());
@@ -688,25 +841,32 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
         std::fprintf(stderr, "  [llm-rerank] %s: LLM 无有效输出，降级 BM25 原序 | 候选: %s\n",
                      q.id.c_str(), cand_dias.c_str());
       } else {
-        std::vector<char> used(evs.size(), 0);
-        std::vector<const ScoredEvent*> rr;
-        std::string sel_dias;
-        for (size_t s : sel) {
-          rr.push_back(evs[s]);
-          used[s] = 1;
-          auto it = evs[s]->event->attrs.find("dia_id");
-          sel_dias += (sel_dias.empty() ? "" : ",") +
-                      (it != evs[s]->event->attrs.end() ? it->second : "-");
-        }
-        for (size_t i = 0; i < evs.size(); ++i)
-          if (!used[i]) rr.push_back(evs[i]);
-        evs = std::move(rr);
-        std::fprintf(stderr, "  [llm-rerank] %s: LLM 置顶 %zu/%zu 条 | 选中: %s | 候选: %s\n",
-                     q.id.c_str(), sel.size(), n, sel_dias.c_str(), cand_dias.c_str());
+        std::string sel_dias = apply_selection(sel);
+        std::fprintf(stderr,
+                     "  [llm-rerank] %s: LLM 置顶 %zu/%zu 条 | 榜首内容分 %.3f | 选中: %s | 候选: %s\n",
+                     q.id.c_str(), sel.size(), n, top_content, sel_dias.c_str(),
+                     cand_dias.c_str());
+      }
+    } else if (!cfg.cheap_rerank_path.empty()) {
+      // 便宜近似 v1：特征逻辑重排（零 LLM 零网络；模型加载失败 → 降级 BM25 原序）。
+      const CheapModel& m = load_cheap_model(cfg.cheap_rerank_path);
+      if (!m.ok) {
+        std::fprintf(stderr, "  [cheap-rerank] %s: 模型加载失败，降级 BM25 原序\n",
+                     q.id.c_str());
+      } else {
+        std::unordered_set<std::string> e_uids(entity_extra_uids.begin(),
+                                               entity_extra_uids.end());
+        auto order_c = cheap_score_pool(m, evs, cs, e_uids);
+        size_t kk = std::min<size_t>((size_t)cfg.k, order_c.size());
+        std::string sel_dias =
+            apply_selection(std::vector<size_t>(order_c.begin(), order_c.begin() + kk));
+        std::fprintf(stderr, "  [cheap-rerank] %s: 置顶 %zu/%zu 条 | 榜首内容分 %.3f | 选中: %s\n",
+                     q.id.c_str(), kk, evs.size(), top_content, sel_dias.c_str());
       }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
-  } else if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) {
+  } else if (((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) ||
+             !cfg.cheap_rerank_path.empty()) {
     std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
   }
 

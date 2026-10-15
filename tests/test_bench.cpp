@@ -603,6 +603,79 @@ static void test_llm_rerank_all() {
   // 默认（全池关、N=0）→ 通道关闭（与 test_llm_rerank_channel 组4 同语义，不再重复断言）
 }
 
+// 任务A BM25 强命中豁免（--rerank-guard）：榜首内容分 ≥ 阈值时 LLM 重排不得挤走它。
+static void test_rerank_guard() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie",
+                  "Pottery class, pottery wheel, pottery glaze, pottery kiln, pottery studio — I love it all.",
+                  ts0, "D1:1", "s1");  // 金标：pottery tf=5 → 单内容词 BM25 分 = 5/6 ≈ 0.833
+  e.remember_turn("Caroline", "I went hiking with friends last weekend.", ts0 + 60, "D2:1",
+                  "s2");  // decoy：零词面命中（BM25 0 分居次位）
+  BenchQuestion q;
+  q.id = "q-guard-1";
+  q.question = "pottery?";  // 单内容词：idf 相消，榜首分 = tf/(tf+1) = 5/6 ≈ 0.833
+  BenchConfig cfg;
+  cfg.use_entity_profile = false;
+  cfg.use_think = false;
+  cfg.llm_rerank_all = true;
+  FakeLlmClient fake;
+  fake.rules.push_back({"q-guard-1", "E2"});  // LLM 误判 decoy 为相关
+  cfg.llm_client = &fake;
+  // 组1：豁免关（默认 -1）→ LLM 误判生效，decoy 居首
+  {
+    auto r = answer(e, q, cfg);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+  }
+  // 组2：豁免 0.8（榜首内容分 = 5/6 ≈ 0.833 > 0.8）→ 保底首槽，LLM 误判被纠正
+  {
+    BenchConfig cfg2 = cfg;
+    cfg2.rerank_guard = 0.8;
+    auto r = answer(e, q, cfg2);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D1:1");
+  }
+}
+
+// 任务B 便宜近似（--cheap-rerank）：特征逻辑重排器替代 LLM 打分（零 LLM）。
+static void test_cheap_rerank() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");  // 金标：句级相关、词面弱
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");  // decoy：词面高频
+  // 玩具模型：唯 bm25_share 权重 -1（偏好低词面份额 = 句级信号替身）
+  const char* mpath = "/tmp/ame_test_cheap_model.json";
+  {
+    std::ofstream f(mpath);
+    f << "{\"features\":[\"bm25_share\"],\"weights\":[-1.0],\"bias\":0.0}";
+  }
+  BenchQuestion q;
+  q.id = "q-cheap-1";
+  q.question = "What book was recommended to Melanie?";
+  BenchConfig cfg;
+  cfg.use_entity_profile = false;
+  cfg.use_think = false;
+  cfg.cheap_rerank_path = mpath;
+  // 组1：便宜重排 → 模型序替代 BM25 序，金标（低份额）居首
+  {
+    auto r = answer(e, q, cfg);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D1:1");
+  }
+  // 组2：模型路径不存在 → 加载失败优雅降级 BM25 原序（decoy 居首）
+  {
+    BenchConfig cfg2 = cfg;
+    cfg2.cheap_rerank_path = "/tmp/ame_test_no_such_model.json";
+    auto r = answer(e, q, cfg2);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+  }
+}
+
 int main() {
   test_load_fixtures();
   test_ingest_graph();
@@ -619,6 +692,8 @@ int main() {
   test_llm_rerank_channel();
   test_llm_rerank_all();
   test_entity_pass_through();
+  test_rerank_guard();
+  test_cheap_rerank();
   test_parse_session_date();
   test_store_adapters();
   return AME_TEST_REPORT();

@@ -363,3 +363,121 @@ python bench/scripts/oracle_ceiling_analyze.py
 - 运行产物（gitignored）：`bench/runs/mechanisms/{off,m1_pass,m2_all,m12_comb}.*`。
 - API 成本（本轮）：m2 17 + m12 71（含 judge）+ 首遍作废 m12 94 ≈ 182 次，
   其中 judge 与重排缓存命中 35 次。
+
+
+---
+
+## 13. 任务 A：q100 型加固——BM25 强命中豁免（--rerank-guard）
+
+> 遗留触发：m12 组合 11 救 1 失（q100：BM25 正确 top-1 被 LLM 挤走）。
+
+**实现**（`bench.h` / `ingest_answer.cpp` / `main.cpp`）：LLM/便宜重排执行前，
+若 BM25 终排序榜首的内容词分数 `top_content ≥ 阈值` → 记住榜首；重排后若其
+不在首槽则前置保底（其余整体后移一位，选中项不丢）。阈值默认 **-1=关**，
+`--rerank-guard X` 开启。选中执行逻辑重构为 LLM/便宜两路共用的
+`apply_selection`（豁免、日志行为不变）。
+
+**阈值校准（关键负发现）**：任务书建议"默认如 0.8"——实测本 benchmark 的
+`top_content` 分布 **max=0.447、中位=0.213**（多词问题稀释 + 池内 df 影响，
+单测里 0.833 的合成值在真实数据不出现）：0.5~0.8 的任何阈值都锁 0 题。
+按校准数据取 **0.2**（p25=0.170 与 q100=0.213 之间）：锁 13 题。
+
+**A/B 验收**（graph/sample50，off 复跑 0.443；组合 m12 0.604/11 救 1 失）：
+
+| 组 | 覆盖率（n=48） | any-hit | 救回 | 丢失 |
+|---|---|---|---|---|
+| m12（无 guard，§10 复测基线） | 0.604 | 34/48 | 11 题 | q100 |
+| m12 + --rerank-guard 0.2 | **0.646** | 36/48 | **12 题**（含 q100、q107） | **0 题** |
+
+- **判据核验**：q100 挽回（金标 D4:15 回 top-1）✓；12 救题全部不回退 ✓
+  （B 类选中序位 1/2/1/1，首槽锁定最多后移一位仍在 top-k）；
+  意外收益 q107（此前被 LLM 位移影响的题，锁定后金标 D7:21 回 top-1）。
+- **判决：任务 A 成立**，最终配置 = `--entity-pass-threshold 0.5
+  --llm-rerank-all --rerank-guard 0.2`（覆盖率 0.646 = +0.203 vs off，
+  judge 维度见 §10 同配置族 0.44）。
+- 单测 `test_rerank_guard` 2 组（豁免关 = LLM 误判生效 / 豁免 0.8 = 保底）。
+
+## 14. 任务 B：便宜近似 v1——特征逻辑重排器（--cheap-rerank）
+
+**监督**（`cheap_rerank_train.py` + oracle 工具 `pools50` 模式）：
+sample50 全部 50 题标准池特征导出（bm25/融合分量/ts/秩，逐行镜像 answer()
+池构造）× m12 两轮运行日志的 LLM top-10 选中并集（跨运行 uid 噪声 → 任一
+轮选中即正例；被展示从未选中 = 负例；从未展示 = 剔除）。训练对 1806
+（正例 315 = 17.4%，42 题；剔除 714 条未见候选）。
+
+**特征泄漏纪律**：特征只用引擎现成信号，不含任何 LLM 产物（LLM 仅作标签）。
+**隔离**：sample50 单 case（conv-26），case 级隔离不可得 → 5-fold 按
+question_id 分组（GroupKFold）。
+
+**训练结果**（纯 Python 批量梯度下降逻辑回归，零依赖仿 GateModel 风格）：
+
+- 5-fold CV：**AUC = 0.699** [0.716/0.756/0.770/0.630/0.623]；
+  **正例 top-10 召回（宏平均）= 0.507** [0.586/0.501/0.561/0.442/0.445]。
+- 权重方向可解释：bm25_rank/bm25_share 正（词面仍是主信号）、time/recency
+  负（时近偏置抑金标的反特征）、ctx 负——模型学到的是"BM25 的修正项"，
+  而非句级语义本身。
+- 模型持久化 `cheap_model.json`（features/weights/bias/CV 指标）。
+
+**判决实验**（--entity-pass-threshold 0.5 --cheap-rerank，零 LLM 零网络，
+两次复跑）：
+
+| 运行 | 覆盖率（n=48） | Δ | B 类 4 题金标进 top-k | 丢失 |
+|---|---|---|---|---|
+| cheap r1 | 0.490 | +0.047 | **1/4**（q154 位8） | 0 题 |
+| cheap r2 | 0.484 | +0.042 | （q154，另 3 题在噪声带内外漂移） | 0 题 |
+
+- 预注册线：≥0.55 且 B 类 ≥3/4 → 成立；<0.52 → 不成立。
+- **判决：便宜近似 v1（特征逻辑回归）不成立**——两判据全不过
+  （0.484~0.490 < 0.52；B 类 1/4）。交叉验证已预告：AUC 0.70 / top-10
+  召回 0.51 的模型 imitation 不了句级判断（这正是 §0 天花板实验的
+  另一面：句级收益来自 LLM 的语义判断本身，词面特征集承载不了它）。
+- **最终形态建议（如实报告）**：产品形态走"**异步 LLM 池级打分 + 磁盘缓存**
+  （DeepSeekClient 缓存机制已具，热路径近零成本）"；特征逻辑回归降级为
+  可选项（本实现保留，--cheap-rerank 默认关）——它零成本零回归
+  （+0.047、0 丢失），可作无网环境的兜底，但不构成主形态。
+  蒸馏方向若续做，需比"池内引擎特征"更强的教师信号（如句向量），
+  不在本任务数据条件内。
+
+## 15. 蓝方自检（任务 A/B 追加）
+
+1. **豁免阈值的数据依赖**：0.8 建议值在本 benchmark 物理不可达（max 0.447）——
+   若直接采纳任务书默认值，guard 将静默无效（0 锁）。校准步骤（先跑一轮
+   采集 top_content 分布再定阈值）写入 §13 作为该机制的启用规程。
+2. **豁免对救题的干扰边界**：锁定仅占用首槽；LLM 选中项整体后移一位。
+   最坏情形：金标位于 LLM 选中序第 10 → 锁定后第 11 出 top-k。实测 B 类
+   序位 1/2/1/1 远离边界；该校验已并入 A/B 判读。
+3. **便宜近似特征泄漏复查**：10 个特征全部来自引擎信号（BM25/融合分量/
+   秩/recency/实体通道标记），标签（LLM 选中）不进特征；is_entity 训练恒 0
+   （合并候选未入训练池），模型该权重≈0，运行时外推安全。
+4. **类别不平衡**：正例 17.4%；未做重采样——逻辑回归 + L2 下 AUC/召回
+   已按不平衡口径报告（rank-based AUC 对先验不敏感；top-10 召回按题宏平均，
+   不被大题数池稀释）。重采样留作后续调参项。
+5. **训练/测试隔离**：单 case 约束下用 question 级 GroupKFold；候选级随机
+   切分会让同题相邻候选泄漏（已避免）。残余风险：同题风格跨折相似，
+   AUC 0.70 仍可能略乐观——端到端两次复跑覆盖率（0.484/0.490）与 CV 预告
+   一致，未见显著虚高。
+6. **cs 对齐 bug 留痕**：BM25 终排重排 evs 后 cs 未跟随重排，便宜特征按
+   下标取到错位值（单测先红后绿：模型反向选择）。修复 = 重排后按 ord
+   重对齐 cs；LLM 路径不受影响（其 prompt 用文本而非 cs）。
+7. **API 纪律**：任务 A/B 全程仅任务 A 的 guard A/B 与校准运行调用 LLM
+   （标注与模型复用既有产物）；cheap 判决运行零 API。
+
+## 16. 改动清单（本节）
+
+- `bench/include/ame/bench/bench.h`：BenchConfig + `rerank_guard`（-1=关）/
+  `cheap_rerank_path`（空=关）。
+- `bench/src/ingest_answer.cpp`：`apply_selection` 共用执行（置顶+豁免）；
+  LLM/便宜两路分支；`CheapModel` 加载（按路径缓存）+ `cheap_score_pool`
+  特征打分（题内 minmax，与训练脚本同口径）；BM25 重排后 cs 重对齐；
+  [llm-rerank] 日志增榜首内容分（阈值校准用）。
+- `bench/cli/main.cpp`：`--rerank-guard X` / `--cheap-rerank PATH`；
+  need_llm 不变（便宜路径零 LLM）；lmem 忽略清单同步。
+- `tests/test_bench.cpp`：`test_rerank_guard`（2 组）+ `test_cheap_rerank`
+  （2 组：模型重排 / 加载失败降级）。
+- `bench/scripts/oracle_ceiling.cpp`：`pools50` 模式（全 50 题特征池导出）+
+  PoolItem 特征扩展。
+- `bench/scripts/cheap_rerank_train.py`（新）：监督提取（跨运行并集标注）+
+  纯 Python 逻辑回归 + 5-fold GroupKFold + 模型持久化。
+- ctest **20/20 全绿**。运行产物：`bench/runs/mechanisms/` 下
+  m12_cal / m12_guard / cheap_r1 / cheap_r2 / pools50 / cheap_model.json
+  （均 gitignored）。

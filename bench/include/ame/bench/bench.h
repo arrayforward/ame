@@ -94,6 +94,16 @@ struct BenchConfig {
   int llm_rerank = 0;                       // 重排候选名额（BM25 终排序 top-N）
   ILlmClient* llm_client = nullptr;         // main 注入；空指针 = 通道关闭
   bool llm_rerank_all = false;              // --llm-rerank-all：重排窗口扩为全池（k_pool）
+  // ---- BM25 强命中豁免（--rerank-guard，默认 -1=关）----
+  // LLM 重排时若 BM25 终排序榜首的内容词分数 ≥ 阈值 → 该证据豁免重排变动、
+  // 保底 top-k 首槽（LLM 未选它也前置；q100 型假阳性防护：词面精确命中的
+  // 正确 top-1 被 LLM 挤走的回退修复）。11 救题的金标位于 BM25 11~27 位、
+  // 不受首槽锁定影响（LLM 选中序 1/2/1/1 → 锁定后最多后移一位仍在 top-k）。
+  double rerank_guard = -1.0;               // <0 = 关闭；建议实验值 0.8（本 benchmark 实测需按 §13 校准）
+  // ---- 便宜近似 v1：特征逻辑重排器（--cheap-rerank PATH，默认空=关）----
+  // 用训练好的逻辑回归模型（cheap_rerank_train.py 产出 JSON）对全池按引擎现成
+  // 特征打分替代 LLM 全池打分（推理零 LLM 零网络）；与 LLM 重排并存时 LLM 优先。
+  std::string cheap_rerank_path;            // 模型 JSON 路径；空 = 关闭
   // ---- 实体档案通道低置信放行（--entity-pass-threshold，默认 -1=关=现状）----
   // 通道裁决（answer_entity_channel 非弃权整通道返回）时置信 = 通道榜首内容分
   // （槽位直查恒 1.0）。置信 < 阈值 → 不整通道返回，其候选去重并入标准管道候选池
