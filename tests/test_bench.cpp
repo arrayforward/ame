@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 
 #include "ame/bench/bench.h"
 #include "ame/bench/metrics.h"
@@ -250,6 +251,55 @@ static void test_chinese_lexicon() {
   }
 }
 
+// 复活工程 R1：灌库源区分——distilled 源全量入别名表（like→love 不再被守卫吃掉），
+// 无 source 字段的源维持 alias_ok 双向守卫（行为逐比特不变），防互换成环。
+static void test_apply_lexicon_source_guard() {
+  const char* distilled = "/tmp/ame_test_lex_distilled.json";
+  const char* plain = "/tmp/ame_test_lex_plain.json";
+  // like/love 互为主词但 strong 不互指：wordnet 式守卫会拒 like->love，蒸馏源应放行
+  const char* body = R"({"entries":[
+    {"word":"like","syn_strong":["love","prefer"],"syn_near":[],"antonyms":[]},
+    {"word":"love","syn_strong":["adore"],"syn_near":[],"antonyms":[]}]})";
+  {
+    std::ofstream f(distilled);
+    f << std::string("{\"source\":\"distilled\",") << (body + 1);
+  }
+  { std::ofstream f(plain); f << body; }
+  // distilled：like->love / like->prefer / love->adore 全量入表
+  {
+    Engine e;
+    int applied = 0;
+    CHECK(apply_lexicon(e, distilled, &applied) == Err::Ok);
+    CHECK(e.keywords().normalize("love") == "like");
+    CHECK(e.keywords().normalize("prefer") == "like");
+    CHECK(e.keywords().normalize("adore") == "love");
+  }
+  // 无 source 字段：守卫保持（love 是主词且 strong 不含 like → 拒）
+  {
+    Engine e;
+    int applied = 0;
+    CHECK(apply_lexicon(e, plain, &applied) == Err::Ok);
+    CHECK(e.keywords().normalize("love") == "love");   // like->love 被拒
+    CHECK(e.keywords().normalize("prefer") == "like"); // 非主词直接归并
+  }
+  // 防环：A<->B 双向 strong 互指在 distilled 源下也不得产生互换归一
+  {
+    const char* cyc = "/tmp/ame_test_lex_cyc.json";
+    {
+      std::ofstream f(cyc);
+      f << "{\"source\":\"distilled\",\"entries\":["
+        << "{\"word\":\"alpha\",\"syn_strong\":[\"beta\"],\"syn_near\":[],\"antonyms\":[]},"
+        << "{\"word\":\"beta\",\"syn_strong\":[\"alpha\"],\"syn_near\":[],\"antonyms\":[]}"
+        << "]}";
+    }
+    Engine e;
+    CHECK(apply_lexicon(e, cyc, nullptr) == Err::Ok);
+    // 不允许 normalize(alpha)==beta 且 normalize(beta)==alpha 的互换
+    CHECK(!(e.keywords().normalize("alpha") == "beta" &&
+            e.keywords().normalize("beta") == "alpha"));
+  }
+}
+
 // 会话日期解析：LoCoMo 月名格式（"1:56 pm on 8 May, 2023"）+ 数字格式回归
 //（月名缺失时时分数字曾被误判为月/日 → 全部会话落入合成时间，cat2 时序题全灭的根因）。
 static void test_parse_session_date() {
@@ -340,6 +390,7 @@ int main() {
   test_order_events();
   test_snapshot_with_slots();
   test_chinese_lexicon();
+  test_apply_lexicon_source_guard();
   test_evidence_content_rerank();
   test_parse_session_date();
   test_store_adapters();

@@ -55,6 +55,7 @@ struct Cli {
                                // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
   std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
+  bool stem_en = false;        // --stem-en：M3 英文保守词干归一（复活工程 R2，查询/写入双侧）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -104,6 +105,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--feedback-dir") cli.feedback_dir = next();
     else if (a == "--fb-exp") cli.fb_exp = next();
     else if (a == "--extractor-dict") cli.extractor_dict = next();
+    else if (a == "--stem-en") cli.stem_en = true;  // 裸开关（默认关）
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -147,6 +149,7 @@ void usage() {
                "      [--fb-exp DIR]（仅 lmem：P2b 双 pass 反馈实验，pass1 判分→feedback 落盘\n"
                "       →pass2 同题单只跑召回对比金标证据排序）\n"
                "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
+               "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -221,6 +224,7 @@ int main(int argc, char** argv) {
     mark("load-graph", !cli.load_graph.empty());
     mark("load-lexicon", !cli.load_lexicon.empty());
     mark("extractor-dict", !cli.extractor_dict.empty());
+    mark("stem-en", cli.stem_en);
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);
@@ -386,6 +390,7 @@ int main(int argc, char** argv) {
       eng_up = std::make_unique<Engine>(fdir);
     }
     Engine& e = *eng_up;
+    if (cli.stem_en) e.keywords().set_stem_en(true);  // R2：摄入（写入侧）前必须开启
     if (cli.has_weights)
       e.reranker().set_weights({cli.w_alpha, cli.w_beta, cli.w_gamma});
     // 引导式扩散阶段 1：beam 配置 + 反馈目录存在时先训监督门控

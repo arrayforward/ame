@@ -398,3 +398,99 @@ near 不可互换：garage→carport；ant 方向正确：dispute↔agree、home
 - `bench/scripts/dbg_lextrace.cpp`：沿用（无改动）。
 - 运行产物：`bench/runs/lexicon_ab/{en,en_dict,en_dict_L2}.*`、`bench/runs/lexicon_en_distill{,2}.log`。
 - ctest **20/20 全绿**（llm 改动后全量 rebuild + ctest，11.82s）。
+
+---
+
+## 11. 复活工程（R1 守卫放行 + R2 词形归一）与第三次审判：词库路线永久封存
+
+> 前置（§9/§10）：蒸馏资产质量"抽样"合格，但 alias_ok 守卫拒收 40% 高频口语桥、
+> 全链路精确词形匹配过不了 loves/love。本节拆这两道闸后做第三次（最后一次）审判。
+
+### 11.1 R1：守卫放行（蒸馏源专用）
+
+- 守卫语义复查：`alias_ok` 防的是"同义词本身也是主词且不互指"的单向归并（多义词
+  链式稀释，如 great↔big 互指时只放行互为成员的对）。**中文 hf 资产同被此守卫吃掉**：
+  抽样 16,068 对 strong 有 5,299（33%）被拒——"中文资产有效"同样从未被端到端验证，
+  一并披露（此前 README/报告的说法仅为灌入幂等观察，非效果验证）。
+- 设计：lexicon JSON 可选 `"source"` 字段（`lexicon_en.json` 已标 `"distilled"`）；
+  灌库时蒸馏源 syn_strong 全量走新入口 `KeywordManager::add_alias_distilled`
+  （canonical=词条主词，另防"双向互指成环"：standard 已归一到 alias 时拒登）。
+  无 source 字段的源（wordnet/中文）走原 `alias_ok` 守卫路径，**逐比特不变**（单测锁定）。
+- 效果：别名表 9,413 → **11,926**（applied 12,665 → 19,231，40% 桥入表）；
+  逐题验证 like→love / kids→children 桥真实生效（§11.3）。
+
+### 11.2 R2：词形归一（查询/写入双侧共用）
+
+- `KeywordManager::normalize` 增加英文保守词干（`set_stem_en` 开关，**默认关**）：
+  别名未命中的纯 ASCII 词按序产出候选词干（'s/ies→y/ied→y/e+d 只去 d/去 ed+双写还原/
+  去 ing+双写还原/ses 双候选/s(x|z|ch|sh)es→去 es/去 s），**护栏=候选词干在图中
+  有 CONTAINS 事件连接（df>0）才归一**，通过后仍查一次别名表（politics→politic→political
+  全链贯通）。CJK 与非 ASCII 词不受影响。
+- 两侧对称性：normalize 是写入侧（M4 CONTAINS 落边）与查询侧（M5 自由文本种子、
+  R1 后 lex 通道查询词先归一再取别名组）共用的唯一入口，天然对称，无单侧捷径。
+- 摄入侧效果：conv-26 Keyword 节点 1163 → **1046**（词形合并生效）。
+- 单测（test_keyword 26 项 / test_bench 101 项全绿）：loves/LOVES→love、loved→love
+  （e+d 特判防 made→mak）、senses→sense 且 sense 不过度、politics→political、
+  防互换成环、默认关闭 = 历史行为、distilled/wordnet 双源守卫行为锁定。
+
+### 11.3 第三次审判（预注册判决线）
+
+**L2 层（df>0 ≥60/219 才算资产有效）**：R1+R2 后扩展词 df>0 = **17/219**（与 wordnet、
+守卫版 en 三次同值）——未达线。逐题看桥是通的（q19 实测 kids→youngsters/children、
+like→love 均 df>0），但聚合指标未动：多数查询词的真同义确实不在 419 事件的小语料里，
+df>0 对小语料天然苛刻。**预注册判决：未达线。**
+
+**端到端（off 0.448 对照，>+0.02 复活 / ±0.02 内无信号封存）**：
+
+| 组 | 覆盖率 | Δ vs off | 逐题 |
+|---|---|---|---|
+| off | 0.448 | — | — |
+| en+R1+R2+extractor-dict（--stem-en） | 0.443 | **-0.005** | 仅 q32（已知噪声翻转题） |
+| 同上 + L2 混合终排 | 0.432 | -0.016 | q102↓/q14↑/q32↓（与历次 L2 完全同款翻转） |
+
+判决：**无信号 → 词库路线永久封存**（三次独立证伪：wordnet 资产、守卫版蒸馏资产、
+拆闸版蒸馏资产；判决线两次预注册、一次端到端，全部未达）。
+
+### 11.4 为什么桥通了端到端还是不动（最终归因，调查闭环）
+
+1. **lex 收录门**：单桥候选过不去 m≥2/单罕见词收录线（q19 金标 D6:6 仅靠
+   love 单命中，与 §9 第 3 层同一死法）；
+2. **R1 放行暴露资产真面目**（蓝方抽检，100 个语料词）：normalize 改变 53 词中
+   **仅 4 个是屈折还原，~46 个是松同义重定向**（dogs→pooches、started→inception、
+   cakes→brownies、valued→appraised、keeps→retain）——蒸馏 strong 流大量不符合
+   "可互换真同义"标准，**alias_ok 守卫不是误伤而是必要过滤**；§10.5 的 20 条随机
+   质检"合格"是抽样偏差，高频动词才是污染重灾区；
+3. 终排混合（L2）四次实验方向均略负，融合分顶上的不是金标。
+
+**最终结论：词库资产假说在本 benchmark 上整体证伪并永久封存。** 蒸馏管线
+（gen_en_vocab.py / build_lexicon_json）与资产文件保留存档；`--extractor-dict`、
+`--stem-en`、`--final-alpha/--final-beta` 开关保留（默认全关，行为与基线一致）；
+若未来出现更大语料/别的 benchmark 想重启，必须先解决"strong 流质量"（可互换性校验）
+与"lex 收录门"两个前置，否则不要再投。
+
+### 蓝方自检逐条
+
+1. **归一函数两侧对称性**：✅ normalize 为写入/查询唯一共用入口；词干护栏基于图状态，
+   两侧同一时刻同一图，无单侧捷径。顺序依赖（先到的词形自建节点）已披露，benchmark
+   摄入序确定故可复现。
+2. **守卫放行的多义污染样本观测**：✅ 100 词抽检 ~46% 松同义重定向（§11.4-2），
+   这是本次调查最重要发现——守卫被平反。
+3. **词干护栏误伤率**：✅ 100 词中词干仅触发 4 例且全部正确（birthdays→birthday、
+   friendships→friendship、happens→happen、brightening→brighten）；拒收案例合理
+   （campaigns 因 campaign 节点无 CONTAINS 连接保守不并）。过度截取（made→mak/
+   senses→sens）由"不做 e-还原 + df 护栏"双重防住，单测锁定。
+
+### 改动清单（本节）
+
+- `keyword/include/.../keyword_manager.h` + `keyword/src/keyword_manager.cpp`：
+  add_alias_distilled（防互换成环）、en_stem 候选生成 + stem_df_ 护栏、
+  set_stem_en 开关、normalize 集成（默认关 = 历史行为）。
+- `bench/src/lexicon_apply.cpp`：source=="distilled" 全量放行，其余源守卫逐比特不变。
+- `seed/src/seed_generator.cpp`：lex 通道查询词先 normalize 再取 variants/near。
+- `bench/cli/main.cpp`：`--stem-en` 裸开关（修复过程中发现其误吞下一参数的解析 bug）。
+- `lexicon/lexicon_en.json`：加 `"source":"distilled"` 根字段。
+- `tests/test_keyword.cpp`（+test_stem_en 26 项）、`tests/test_bench.cpp`
+  （+test_apply_lexicon_source_guard 101 项）。
+- `bench/scripts/dbg_lextrace.cpp`：默认开 stem + `--stemcheck` 蓝方抽检模式。
+- ctest **20/20 全绿**（8.88s）；E2E 运行产物 `bench/runs/lexicon_ab/R1R2{,_L2}.*`、
+  `bench/runs/stem_{sample,out}.txt`。

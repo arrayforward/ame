@@ -39,6 +39,15 @@ class KeywordManager {
   // 别名表归一：睡不着/失眠症 → 失眠
   std::string normalize(const std::string& word) const;
   void add_alias(const std::string& alias, const std::string& standard);
+  // 蒸馏源专用别名登记（lexicon_apply 的 distilled 路径）：语义同 add_alias，
+  // 另防"双向互指成环"——若 standard 当前已归一到 alias（alias<->standard 互换），
+  // 拒绝登记返回 false。非蒸馏源（wordnet/中文）不走此入口，行为逐比特不变。
+  bool add_alias_distilled(const std::string& alias, const std::string& standard);
+  // 英文保守词干开关（复活工程 R2）：开启后 normalize 对"别名未命中"的纯 ASCII 词
+  // 尝试保守去后缀（'s/es/ies/s/ed/ing，含双写还原），护栏=去后缀后长度≥3 且词干
+  // 在图中有 CONTAINS 连接（df>0）才归一；查询/写入两侧共用本函数。默认关闭。
+  void set_stem_en(bool on) { stem_en_ = on; }
+  bool stem_en() const { return stem_en_; }
   // 别名表持久化（并入 M12 组合快照，解决 load-graph 必须另带词典的问题）
   Json aliases_to_json() const;
   void aliases_from_json(const Json& j);
@@ -77,6 +86,9 @@ class KeywordManager {
   // near -> [(近义词, score)]（词典灌库记录；与图边无关，即使节点未建也保留）
   std::unordered_map<std::string, std::vector<std::pair<std::string, double>>> near_;
   std::unordered_set<std::string> stopwords_;
+  bool stem_en_ = false;  // R2 英文保守词干（默认关，--stem-en 开）
+  // 词干 df 护栏：词干关键词节点有 CONTAINS 事件连接才认可归一
+  int stem_df_(const std::string& stem) const;
 };
 
 }  // namespace ame

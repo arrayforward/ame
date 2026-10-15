@@ -26,6 +26,10 @@ namespace ame {
 //   步骤4：antonyms → 双方节点存在 → REL_OPPOSITE 边（core 系数 0.5，最低传导，
 //         扩散中不会被当强联想）；
 //   步骤5：返回灌入条目数（applied 出参）。
+// 源区分（复活工程 R1）：root 带 "source":"distilled" 的蒸馏产物，syn_strong 全量
+//   走 add_alias_distilled 入表（canonical=词条主词；防互换成环在 M3 登记处兜），
+//   修口语高频桥（like→love，同义词也是主词）被 alias_ok 守卫吃掉的问题；
+//   无 source 字段的源（wordnet/中文）维持 alias_ok 守卫，行为逐比特不变。
 Err apply_lexicon(Engine& engine, const std::string& path, int* applied) {
   std::ifstream f(path);
   if (!f) return Err::IoError;
@@ -36,6 +40,8 @@ Err apply_lexicon(Engine& engine, const std::string& path, int* applied) {
   if (!ok) return Err::ParseError;
   const Json* entries = root.find("entries");
   if (!entries) return Err::ParseError;
+  const Json* src = root.find("source");
+  const bool distilled = src && src->as_str() == "distilled";
   int n = 0;
   // 主词集合与主词→strong 表（防链式/互指重映射：本身是主词的词，仅当与当前词
   // 互为同义组成员（双向 strong 互指）时才允许归并；多义词单向互指跳过）
@@ -59,16 +65,24 @@ Err apply_lexicon(Engine& engine, const std::string& path, int* applied) {
     const Json* w = e.find("word");
     if (!w || w->as_str().empty()) continue;
     std::string word = w->as_str();
-    // 同义 → 别名归并（syn_strong，兼容旧版 synonyms 字段）；
-    // 主词别名需互为同义组成员（防多义词互指稀释，如 great↔big）
+    // 同义 → 别名归并（syn_strong，兼容旧版 synonyms 字段）：
+    // 蒸馏源全量入表（canonical=主词）；其余源维持双向守卫（防多义词互指稀释）
     const Json* strong = e.find("syn_strong");
     if (!strong) strong = e.find("synonyms");
     if (strong)
-      for (auto& s : strong->arr)
-        if (!s.as_str().empty() && alias_ok(word, s.as_str())) {
+      for (auto& s : strong->arr) {
+        if (s.as_str().empty()) continue;
+        bool in;
+        if (distilled) {
+          in = engine.keywords().add_alias_distilled(s.as_str(), word);
+        } else if (alias_ok(word, s.as_str())) {
           engine.keywords().add_alias(s.as_str(), word);
-          ++n;
+          in = true;
+        } else {
+          in = false;
         }
+        if (in) ++n;
+      }
     // 近义 → REL_SIMILAR 边（保留双节点；score>0.6、≤8 条）；
     // 同时登记近义词表（供条件归一降级扩展，不要求节点存在）
     const Json* near = e.find("syn_near");

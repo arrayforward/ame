@@ -168,22 +168,25 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
         //   无命中 → strong 别名 ×0.6，无 strong 再降级 syn_near ×0.4（≤3 个）。
         std::unordered_map<std::string, std::pair<std::string, double>> expand_of;  // 扩展词 -> (原词, 折扣)
         for (auto& w : qcontent) {
+          // R2 查询侧：查询词先过 M3 归一（词干+别名）， loves→love 后取 love 的别名组，
+          // 词形变化（loves/loved）作为别名精确匹配事件词面
+          const std::string nw = kw_.normalize(w);
           if (q.conditional_normalize) {
-            bool direct = df[w] > 0 || kw_.find(kw_.normalize(w)) != nullptr;
+            bool direct = df[w] > 0 || df[nw] > 0 || kw_.find(nw) != nullptr;
             std::string capw = w;
             capw[0] = (char)std::toupper((unsigned char)capw[0]);
             bool is_person = storage_.find_by_name(NodeKind::Entity, capw) != nullptr;
             if (direct || is_person) continue;
-            auto strong = kw_.variants(w, 3);
+            auto strong = kw_.variants(nw, 3);
             if (!strong.empty()) {
               for (auto& v : strong)
                 if (!qcontent.count(v)) expand_of[v] = {w, 0.6};
             } else {
-              for (auto& [v, sc] : kw_.near_words(w, 3))
+              for (auto& [v, sc] : kw_.near_words(nw, 3))
                 if (!qcontent.count(v)) expand_of[v] = {w, 0.4};
             }
           } else {
-            for (auto& v : kw_.variants(w, 3))
+            for (auto& v : kw_.variants(nw, 3))
               if (!qcontent.count(v)) expand_of[v] = {w, 0.6};
           }
         }

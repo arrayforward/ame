@@ -112,6 +112,16 @@ int main(int argc, char** argv) {
                                                    std::string(argv[4]) + ".ac");
     std::fprintf(stderr, "[dict] loaded %d\n", n);
   }
+  // R2：调查工具默认开启英文词干（灌库后开，词干 df 护栏需要图已存在）
+  e.keywords().set_stem_en(true);
+
+  // 蓝方自检模式：--stemcheck FILE 逐词打印 w -> normalize(w) 后退出
+  if (argc > 5 && std::string(argv[5]) == "--stemcheck") {
+    std::ifstream wf(argv[6]);
+    std::string w;
+    while (wf >> w) std::printf("%s -> %s\n", w.c_str(), e.keywords().normalize(w).c_str());
+    return 0;
+  }
 
   // ---- 第2层：问题词激活率 ----
   std::printf("\n== L2层 查询词激活率（lex 通道口径，baseline 无条件归一）==\n");
