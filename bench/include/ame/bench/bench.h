@@ -78,6 +78,10 @@ struct BenchConfig {
   bool final_mix = false;              // --final-alpha/--final-beta 任一传入即开启
   double final_alpha = 0.6;            // BM25 内容分权重（默认 0.6）
   double final_beta = 0.4;             // 1.x 融合分权重（默认 0.4）
+  // ---- M1 桥介收录（复活工程第四轮）----
+  // lex 通道收录门分级：直接命中 1.0 + 桥介命中（事件词归一后命中查询词面）0.5；
+  // 总分 ≥1.0 且含桥介 → 收录但权重 ×0.5、词面分封顶 0.5。仅 --bridge-admit 开启。
+  bool bridge_admit = false;
 
   // ---- LLM 管线配置（任务二）----
   std::string extractor_mode = "rule";    // rule|llm（llm 按会话批量提取）

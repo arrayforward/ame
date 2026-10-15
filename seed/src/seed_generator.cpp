@@ -221,6 +221,37 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
           if (m >= 2 || (m == 1 && rare_hit)) {
             double w = 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0);
             scored.emplace_back(w, events[i]->uid);
+            continue;
+          }
+          // ---- M1 桥介收录（仅 --bridge-admit）：单桥候选的降级入池通道 ----
+          // 事件词经 M3 归一（strong 别名表/词干）后命中查询词面 → 桥介命中 0.5；
+          // 防噪声闸：归一必须真实改变词形（词对存在于别名表），非任意单字偶合；
+          // 收录线：直接分 + 桥介分 ≥1.0 且至少一次桥介；权重 ×0.5、词面分封顶 0.5。
+          if (!q.bridge_admit) continue;
+          double bs = 0;
+          bool has_bridge = false;
+          for (auto& t : etoks[i]) {
+            if (qcontent.count(t) || expand_of.count(t)) continue;  // 直接命中已计
+            std::string nw = kw_.normalize(t);
+            if (nw == t) continue;  // 归一未改词形 → 非别名表词对，不算桥
+            auto it = idf.find(nw);
+            if (it != idf.end()) {
+              bs += 0.5 * it->second;
+              has_bridge = true;
+            } else {
+              auto jt = expand_of.find(nw);
+              if (jt != expand_of.end()) {
+                bs += 0.5 * jt->second.second * idf[nw];
+                has_bridge = true;
+              }
+            }
+          }
+          double total = s + bs;
+          if (has_bridge && total >= 1.0) {
+            double norm = idf_sum > 0 ? total / idf_sum : 0;
+            if (norm > 0.5) norm = 0.5;  // 单桥候选词面分封顶（防噪声顶翻真命中）
+            double w = (0.3 + 0.7 * norm) * 0.5;
+            scored.emplace_back(w, events[i]->uid);
           }
         }
         std::sort(scored.begin(), scored.end(), std::greater<>());

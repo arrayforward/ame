@@ -479,6 +479,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
   sq.soft_topk = cfg.k > 5 ? cfg.k : 8;
   sq.lex_topk = cfg.k_pool / 2;  // 词法通道配额：候选池的一半
   sq.conditional_normalize = cfg.conditional_normalize;
+  sq.bridge_admit = cfg.bridge_admit;  // M1 桥介收录（--bridge-admit，默认关）
 
   RecallFilters filters;
   if (qdate > 0) {

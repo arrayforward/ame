@@ -183,6 +183,56 @@ static void test_conditional_normalize() {
   CHECK(!has_seed(s4, "ev1"));   // 不经扩展误入
 }
 
+// M1 桥介收录（复活工程第四轮，--bridge-admit）：
+// q19 型：查询含直接词 + 事件含经"词干+别名"全链解析的同义形（loved→love→like），
+// 该形不在 variants 扩展表内（纯桥介）→ 开关关不进池、开关开进池且权重 ×0.5；
+// 无桥噪声事件（归一不改变词形）零新增。stem 护栏需要 love 节点有 CONTAINS 连接。
+static void test_bridge_admit() {
+  Fixture f;
+  // love 节点 + 假事件边（stem_df 护栏）；别名 love→like（R1 蒸馏源语义）
+  std::string love_uid = f.kw.get_or_create("love", "attr");
+  Node ev0;
+  ev0.uid = "ev0"; ev0.kind = NodeKind::Event; ev0.text = "love";
+  f.s.put_node(ev0);
+  f.s.put_edge(Edge{"ev0", love_uid, RelType::CONTAINS, 1.0, {}});
+  f.kw.add_alias("love", "like");
+  f.kw.set_stem_en(true);
+  Node ev1, ev2;
+  ev1.uid = "ev1"; ev1.kind = NodeKind::Event;
+  ev1.text = "The kid loved the dinosaur exhibit";  // kid 直接 + loved→love→like 桥介
+  ev2.uid = "ev2"; ev2.kind = NodeKind::Event;
+  ev2.text = "The weather is nice today";           // 零命中噪声
+  f.s.put_node(ev1); f.s.put_node(ev2);
+
+  // 开关关（默认）：单直接词（非罕见）+ 纯桥介 → 历史收录线不放行
+  SeedQuery q0;
+  q0.text = "What did the kid like?";
+  auto s0 = f.sg.gen_seeds(q0);
+  bool f1 = false, f2 = false;
+  for (auto& sd : s0) {
+    if (sd.node_uid == "ev1") f1 = true;
+    if (sd.node_uid == "ev2") f2 = true;
+  }
+  CHECK(!f1 && !f2);
+
+  // 开关开：桥介命中使 ev1 进池（权重 = (0.3+0.7·≤0.5)×0.5 ≤ 0.325），ev2 仍排除
+  SeedQuery q1;
+  q1.text = "What did the kid like?";
+  q1.bridge_admit = true;
+  auto s1 = f.sg.gen_seeds(q1);
+  bool b1 = false, b2 = false;
+  for (auto& sd : s1) {
+    if (sd.node_uid == "ev1") {
+      b1 = true;
+      CHECK(sd.source == "lex");
+      CHECK(sd.weight > 0.0 && sd.weight <= 0.33);
+    }
+    if (sd.node_uid == "ev2") b2 = true;
+  }
+  CHECK(b1);
+  CHECK(!b2);  // 无桥噪声场景零新增
+}
+
 int main() {
   test_hard_seeds();
   test_soft_seeds();
@@ -190,5 +240,6 @@ int main() {
   test_merge_dedup();
   test_lex_seeds();
   test_conditional_normalize();
+  test_bridge_admit();
   return AME_TEST_REPORT();
 }

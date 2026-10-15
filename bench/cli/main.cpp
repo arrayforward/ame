@@ -44,6 +44,7 @@ struct Cli {
   std::string dump_path;       // --dump：逐题结果 NDJSON 落盘路径
   std::string cand_dump_path;  // --cand-dump：lmem 候选池全量 NDJSON 落盘路径（P3a miss 诊断）
   std::string build_lexicon;   // --build-lexicon：词频表路径（构建词典后退出）
+  std::string validate_lexicon;  // --validate-lexicon：蒸馏词库 strong 流可互换校验（M2）
   std::string lexicon_out = "bench/data/lexicon.json";
   std::string load_lexicon;    // --load-lexicon：词典灌库路径
   std::string question_ids;    // --question-ids：只评测这些 question_id（JSON 数组）
@@ -56,6 +57,7 @@ struct Cli {
   std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
   bool stem_en = false;        // --stem-en：M3 英文保守词干归一（复活工程 R2，查询/写入双侧）
+  bool bridge_admit = false;   // --bridge-admit：lex 通道桥介收录分级（第四轮 M1，默认关）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -86,6 +88,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--dump") cli.dump_path = next();
     else if (a == "--cand-dump") cli.cand_dump_path = next();
     else if (a == "--build-lexicon") cli.build_lexicon = next();
+    else if (a == "--validate-lexicon") cli.validate_lexicon = next();
     else if (a == "--lexicon-out") cli.lexicon_out = next();
     else if (a == "--lexicon-topn") cli.lexicon_topn = std::atoi(next().c_str());
     else if (a == "--load-lexicon") cli.load_lexicon = next();
@@ -106,6 +109,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--fb-exp") cli.fb_exp = next();
     else if (a == "--extractor-dict") cli.extractor_dict = next();
     else if (a == "--stem-en") cli.stem_en = true;  // 裸开关（默认关）
+    else if (a == "--bridge-admit") cli.bridge_admit = true;  // 裸开关（默认关）
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -150,6 +154,7 @@ void usage() {
                "       →pass2 同题单只跑召回对比金标证据排序）\n"
                "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
                "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
+               "      [--bridge-admit]（graph：lex 通道桥介收录分级，默认关）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -190,6 +195,28 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  // M2 strong 流可互换性校验：--validate-lexicon <in.json> [--lexicon-out PATH]
+  // （复活工程第四轮；只保留 LLM 判 yes 的 strong 对，写新文件不动原始蒸馏产物）
+  if (!cli.validate_lexicon.empty()) {
+    std::filesystem::create_directories(cli.cfg.cache_dir);
+    auto client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model,
+                                              cli.cfg.cache_dir);
+    if (!client) {
+      std::fprintf(stderr, "未找到 API key\n");
+      return 1;
+    }
+    int pairs = validate_lexicon_json(*client, cli.validate_lexicon, cli.lexicon_out,
+                                      50, cli.cfg.concurrency);
+    if (pairs < 0) {
+      std::fprintf(stderr, "校验失败（输入不可读或解析失败）\n");
+      return 1;
+    }
+    std::fprintf(stderr, "[validate] %s -> %s（%d 对，api_calls=%d cache_hits=%d）\n",
+                 cli.validate_lexicon.c_str(), cli.lexicon_out.c_str(), pairs,
+                 client->api_calls(), client->cache_hits());
+    return 0;
+  }
+
   if (cli.dataset.empty() || cli.data.empty()) {
     usage();
     return 1;
@@ -225,6 +252,7 @@ int main(int argc, char** argv) {
     mark("load-lexicon", !cli.load_lexicon.empty());
     mark("extractor-dict", !cli.extractor_dict.empty());
     mark("stem-en", cli.stem_en);
+    mark("bridge-admit", cli.bridge_admit);
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);

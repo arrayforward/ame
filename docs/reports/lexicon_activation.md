@@ -494,3 +494,93 @@ df>0 对小语料天然苛刻。**预注册判决：未达线。**
 - `bench/scripts/dbg_lextrace.cpp`：默认开 stem + `--stemcheck` 蓝方抽检模式。
 - ctest **20/20 全绿**（8.88s）；E2E 运行产物 `bench/runs/lexicon_ab/R1R2{,_L2}.*`、
   `bench/runs/stem_{sample,out}.txt`。
+
+---
+
+## 12. 第四轮：换真机制（M1 收录门分级 + M2 strong 流精筛）与终局审判
+
+> 第三轮封存的两个真死因：lex 收录门 m≥2 挡单桥候选；strong 流 46% 松同义。
+> 本轮分别用 M1/M2 拆这两道闸，审判线与第三轮同口径可比。用户指定为最后一次。
+
+### 12.1 M1：收录门分级（seed_generator lex 通道，`--bridge-admit` 默认关）
+
+- 直接命中计 1.0（原语义）；**桥介命中**（事件词经 M3 归一——strong 别名表/词干——
+  后命中查询词面，且归一必须真实改变词形 = 防噪声闸）计 0.5；
+- 收录线：总分 ≥2.0 维持原行为；**≥1.0 且含 ≥1 桥介 → 收录但权重 (0.3+0.7·norm)×0.5、
+  norm 封顶 0.5**（norm = 命中分/idf_sum）。
+- 单测 test_bridge_admit（24/24 全绿子集）：q19 型（kid 直接 + loved→love→like 纯桥介，
+  该形不在 variants 扩展表内）开关关不进池、开关开进池且权重 ≤0.33；零命中噪声事件
+  零新增；默认关 = 历史行为（test_seed 既有断言全破不了）。
+
+### 12.2 M2：strong 流可互换性精筛（`--validate-lexicon`，llm 层新函数）
+
+- 逐对问 LLM"大多数句子里 A 能否直接替换 B 且句意不变"，批量 50/批、磁盘缓存、
+  断点续跑、失败批 fail-open（宁留噪声不丢真同义，缓存使重跑零成本）。
+- 成本：**404 次调用 / 1m29s / 失败批 0**（20,173 对）。
+- 产出 `lexicon/lexicon_en_validated.json`（不动原始蒸馏产物；root 带
+  source=distilled, validated=true）：**strong 对 20,173 → 9,419（保留 46.7%）**。
+- 质检（随机 20 条被拒对，人工判读）：拒绝基本正确——switch→replace、apartments→
+  condominiums、picnic→cookout、exist→be、gospel→doctrine 确实不可直接替换；
+  need→demand、town→village、uncommon→rare 偏严但在"直接替换"语义下可辩护。
+- **重要观察**：冒烟时 LLM 把 **like→love 判 no**（"I like ice cream"→"love" 语义强度
+  变了）——严格可互换语义会系统性拒绝"召回有用的方向性近义桥"。M2 按任务书原样执行
+  （预注册），但该观察说明：召回场景要的是方向性宽松语义（本质就是 syn_near 0.6 折
+  扣扩展做的事），不是双向可互换。
+
+### 12.3 审判 A/B（预注册线）
+
+**L2 层 df>0**：validated 词库 **10/219**（<60 预注册线，未达；比守卫版 17 还低——
+精筛把"有 df 的松同义对"也删了）。
+
+**端到端（off 0.448）**：
+
+| 组 | 覆盖率 | Δ vs off | 关键翻转 |
+|---|---|---|---|
+| B = validated+stem+M1 | 0.464 | +0.016 | **q22 0→1.0**（稳定） |
+| C = B+extractor-dict | 0.469（峰值）/ 0.464（两次复跑稳定） | +0.021 峰值 / **+0.016 稳定** | q22 0→1.0；any-hit 25→26 |
+| 无 M1 对照（validated+stem） | 0.464 | +0.016 | 与 B 逐题全同 |
+
+**单桥 miss 救回线**：**过**——q22（"Would Caroline likely have Dr. Seuss books…"，
+would-likely 推理类单桥 miss）金标 D6:9 进 top-k（rank 5），三次运行稳定。
+q19/q64 本体仍 miss（D6:6 仅 love 单桥 0.5 < 1.0 收录线；D15:28 无任何查询词面）。
+
+**逐项判决**：
+1. L2 df>0 ≥60/219：**不过**（10/219）；
+2. C 组 >+0.02：**不过**（稳定 +0.016；+0.021 为单翻转题的噪声上沿）；
+3. 单桥类 ≥1 题金标进 top-k：**过**（q22，稳定 ×3）。
+
+### 12.4 蓝方自检
+
+- **桥介收录噪声实测**：M1 开 vs 关在 sample50 top-k 上**零新增候选**（逐题 50/50
+  一致）——桥介候选进了种子/扩散但在终排前未达 top-k；零噪声、零收益（本组数据）。
+  q22 的救回来自 validated 词库+词干引起的图结构变化（D6:9 词面含 books 直命中 +
+  关键词图拓扑变化），非桥介通道。
+- **M2 精筛方向观察**：严格可互换语义系统性拒绝方向性近义桥（like→love=no），
+  召回场景的语义宽松度需求与"防污染"天然张力——这是词库路线的深层悖论，不是
+  工程能完全消除的。
+- **机制归属诚实声明**：q22 救回为真实稳定收益，但归因于"validated 灌库+stem"组合
+  效应，无法干净拆到单一开关。
+
+### 12.5 终局结论（第四次，用户指定的最后一次）
+
+预注册判决线 2/3 未过（决定性复活线 C>+0.02 稳定值 +0.016 未达）→ **词库路线
+在本 benchmark 不复活，也不再续投**。与第三轮"结构性承载不了"的措辞不同，本轮数据
+给出了更精确的终局画像：**词面范式对词级语义有真实但极有限的承载力**——四轮工程
+把覆盖率从 0.448 推到稳定 0.464（+0.016，≈1 题/50 的机制性救回、any-hit +1），
+这就是该范式在本 benchmark 上的收益上限。要再往上，缺的不再是别名录入与词形归一
+（两道闸都拆了、资产也精筛了），而是语义召回本身（向量/推理通道）的事。
+
+### 改动清单（本节）
+
+- `seed/include/.../seed_generator.h` + `seed/src/seed_generator.cpp`：
+  SeedQuery.bridge_admit + lex 通道桥介收录分级（默认关 = 历史行为）。
+- `llm/include/.../components.h` + `llm/src/lexicon.cpp`：
+  `validate_lexicon_json`（M2，批量/缓存/断点/fail-open）。
+- `bench/cli/main.cpp`：`--bridge-admit` 裸开关、`--validate-lexicon` 模式、usage。
+- `bench/include/.../bench.h` + `bench/src/ingest_answer.cpp`：cfg.bridge_admit 透传。
+- `tests/test_seed.cpp`：+test_bridge_admit（24/24）。
+- 新资产：`lexicon/lexicon_en_validated.json`（12,131 条，strong 9,419 对，已标
+  validated=true）；原始 `lexicon_en.json` 未动。
+- ctest **20/20 全绿**（11.39s，llm 层改动后全量 rebuild）。
+- 运行产物：`bench/runs/lexicon_ab/{B_valid,C_valid_dict,Bprime_valid_nobridge,
+  C_rerun1,C_rerun2}.*`、`bench/runs/lexicon_en_validate.log`。

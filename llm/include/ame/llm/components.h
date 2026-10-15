@@ -98,4 +98,12 @@ class LlmJudge : public IJudge { public:
 int build_lexicon_json(ILlmClient& client, const std::vector<std::string>& vocab_paths,
                        const std::string& out_path, int top_n, int batch, int concurrency);
 
+// 复活工程第四轮 M2：蒸馏词库 strong 流可互换性二次精筛。逐对问 LLM
+// "大多数句子里 A 能否直接替换 B 且句意不变"，只保留答 yes 的对；
+// in_path 为蒸馏产物（source=distilled），out_path 写新文件（不动原始产物），
+// 根字段带 validated=true；断点续跑（按 word 跳过已完成），批量磁盘缓存。
+// 返回处理的 pair 总数（失败返回 -1）。
+int validate_lexicon_json(ILlmClient& client, const std::string& in_path,
+                          const std::string& out_path, int batch, int concurrency);
+
 }  // namespace ame

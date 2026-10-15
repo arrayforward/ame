@@ -53,6 +53,10 @@ struct SeedQuery {
   // 条件归一：仅当查询词在图中无直接命中（关键词节点与事件词面均无）时才词典扩展——
   // strong 别名 ×0.6，无 strong 降级 syn_near ×0.4（≤3 个）；有命中保持原词；人名不扩展
   bool conditional_normalize = false;
+  // M1 桥介收录（复活工程第四轮，--bridge-admit）：事件词经别名表/词干归一后命中
+  // 查询词面计桥介命中（0.5），总分 ≥1.0 且含 ≥1 桥介 → 收录但权重 ×0.5、词面分封顶 0.5。
+  // 默认关 = 历史收录行为逐行不变。
+  bool bridge_admit = false;
 };
 
 class SeedGenerator {
