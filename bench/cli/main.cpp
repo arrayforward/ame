@@ -58,6 +58,7 @@ struct Cli {
   std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
   std::string word_sim_path;   // --word-edges FILE[,FILE2]：统一 graded 边表（第六轮，默认空=关）
+  int llm_rerank = 0;          // --llm-rerank N：句级语义 LLM 重排名额（0=关，默认 20 实验值）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -110,6 +111,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--fb-exp") cli.fb_exp = next();
     else if (a == "--extractor-dict") cli.extractor_dict = next();
     else if (a == "--word-edges") cli.word_sim_path = next();
+    else if (a == "--llm-rerank") cli.llm_rerank = std::atoi(next().c_str());
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -155,6 +157,8 @@ void usage() {
                "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
                "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
+               "      [--llm-rerank N]（graph：句级语义 LLM 重排，BM25 终排截 top-k 前取\n"
+               "       前 N 证据一次 LLM 调用重选；0=关默认；失败优雅降级 BM25 原序）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -163,6 +167,7 @@ void usage() {
 
 int main(int argc, char** argv) {
   Cli cli = parse_args(argc, argv);
+  cli.cfg.llm_rerank = cli.llm_rerank;  // --llm-rerank N → BenchConfig（0=关）
 
   // 词典构建模式：--build-lexicon <vocab_freq.json> [--lexicon-out PATH] [--lexicon-topn N]
   if (!cli.build_lexicon.empty()) {
@@ -302,6 +307,7 @@ int main(int argc, char** argv) {
     mark("load-lexicon", !cli.load_lexicon.empty());
     mark("extractor-dict", !cli.extractor_dict.empty());
     mark("word-sim", !cli.word_sim_path.empty());
+    mark("llm-rerank", cli.llm_rerank > 0);
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);
@@ -333,7 +339,7 @@ int main(int argc, char** argv) {
   std::unique_ptr<LlmJudge> llm_judge;
   RuleExtractor rule_ext;
   bool need_llm = cli.cfg.extractor_mode == "llm" || cli.cfg.answer_mode == "llm" ||
-                  cli.cfg.judge_mode == "llm";
+                  cli.cfg.judge_mode == "llm" || cli.llm_rerank > 0;
   if (need_llm) {
     std::filesystem::create_directories(cli.cfg.cache_dir);
     client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model, cli.cfg.cache_dir);
@@ -342,6 +348,7 @@ int main(int argc, char** argv) {
                    cli.cfg.config_path.c_str());
       return 1;
     }
+    cli.cfg.llm_client = client.get();  // 句级语义重排通道注入（--llm-rerank N）
     llm_ext = std::make_unique<LlmExtractor>(client.get(), &rule_ext);
     llm_ans = std::make_unique<LlmAnswerer>(client.get());
     llm_judge = std::make_unique<LlmJudge>(client.get());

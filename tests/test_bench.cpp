@@ -12,6 +12,7 @@
 #include "ame/bench/metrics.h"
 #include "ame/bench/store.h"
 #include "ame/engine/engine.h"
+#include "ame/llm/llm.h"
 #include "ame/mem/mem.h"
 #include "test_util.hpp"
 
@@ -380,6 +381,97 @@ static void test_store_adapters() {
   CHECK(lmem_dia);  // lmem 证据 dia_id 经 ref_obs → 观测 meta 回溯
 }
 
+// LLM 重排响应解析（容错）：编号序/去重/越界跳过/NONE/散文夹带/截 k
+static void test_llm_rerank_parse() {
+  // 常规编号序（0 基下标）
+  auto v = parse_llm_rerank_ids("E3 E1 E7", 10, 3);
+  CHECK(v.size() == 3 && v[0] == 2 && v[1] == 0 && v[2] == 6);
+  // 去重 + 越界（E0/E11 对 n=10 无效）跳过
+  v = parse_llm_rerank_ids("E2 E2 E0 E11 E5", 10, 5);
+  CHECK(v.size() == 2 && v[0] == 1 && v[1] == 4);
+  // NONE / 空响应 / 纯解释 → 空（降级信号）
+  CHECK(parse_llm_rerank_ids("NONE", 10, 3).empty());
+  CHECK(parse_llm_rerank_ids("", 10, 3).empty());
+  CHECK(parse_llm_rerank_ids("这些证据都无法回答问题。", 10, 3).empty());
+  // 散文中夹带编号（带词边界保护：the 里的 e 不误配）
+  v = parse_llm_rerank_ids("我认为 E4 和 E2 最相关，the others are noise.", 10, 5);
+  CHECK(v.size() == 2 && v[0] == 3 && v[1] == 1);
+  // k 截断
+  v = parse_llm_rerank_ids("E1 E2 E3", 10, 2);
+  CHECK(v.size() == 2 && v[0] == 0 && v[1] == 1);
+}
+
+// LLM 重排通道（句级语义 spike，--llm-rerank N）：
+//   BM25 终排把词面高频 decoy 置顶、金标压第 2 → LLM 返回 E2 后金标置顶；
+//   LLM 空响应/无有效编号 → 优雅降级，保持 BM25 原序（默认 N=0 不触发另由 off 行为覆盖）。
+static void test_llm_rerank_channel() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");  // 金标：词面弱匹配
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");  // decoy：词面高频命中
+  BenchQuestion q;
+  q.id = "q-rerank-1";
+  q.question = "What book was recommended to Melanie?";
+
+  // 组1：LLM 选 E2（金标）→ 置顶
+  {
+    BenchConfig cfg;
+    cfg.use_entity_profile = false;  // 只验标准管道重排
+    cfg.use_think = false;
+    cfg.llm_rerank = 5;
+    FakeLlmClient fake;
+    fake.rules.push_back({"q-rerank-1", "E2"});
+    cfg.llm_client = &fake;
+    auto r = answer(e, q, cfg);
+    CHECK(!r.evidence_uids.empty());
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D1:1");
+    CHECK(fake.received.size() == 1);  // 每题一次调用
+  }
+  // 组2：LLM 空响应（模拟无网/失败）→ 降级 BM25 原序（decoy 居首）
+  {
+    BenchConfig cfg;
+    cfg.use_entity_profile = false;
+    cfg.use_think = false;
+    cfg.llm_rerank = 5;
+    FakeLlmClient fake;
+    fake.default_response = "";
+    cfg.llm_client = &fake;
+    auto r = answer(e, q, cfg);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+  }
+  // 组3：LLM 返回无有效编号 → 同样降级
+  {
+    BenchConfig cfg;
+    cfg.use_entity_profile = false;
+    cfg.use_think = false;
+    cfg.llm_rerank = 5;
+    FakeLlmClient fake;
+    fake.default_response = "这些证据都不相关，无法回答。";
+    cfg.llm_client = &fake;
+    auto r = answer(e, q, cfg);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+  }
+  // 组4：默认 cfg（llm_rerank=0）→ 通道关闭，行为与历史一致
+  {
+    BenchConfig cfg;
+    cfg.use_entity_profile = false;
+    cfg.use_think = false;
+    FakeLlmClient fake;
+    fake.default_response = "E1";  // 即便有客户端也不该被调用
+    cfg.llm_client = &fake;
+    auto r = answer(e, q, cfg);
+    const Node* front = e.storage().get_node(r.evidence_uids.front());
+    CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+    CHECK(fake.received.empty());
+  }
+}
+
 int main() {
   test_load_fixtures();
   test_ingest_graph();
@@ -391,6 +483,8 @@ int main() {
   test_chinese_lexicon();
   test_apply_lexicon_source_guard();
   test_evidence_content_rerank();
+  test_llm_rerank_parse();
+  test_llm_rerank_channel();
   test_parse_session_date();
   test_store_adapters();
   return AME_TEST_REPORT();

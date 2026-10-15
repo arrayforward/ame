@@ -14,11 +14,13 @@
 
 #include "ame/engine/engine.h"
 #include "ame/extractor/extractor.h"
+#include "ame/llm/llm.h"
 #include "ame/time/time_service.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
@@ -149,6 +151,63 @@ static std::vector<double> content_scores(const std::string& question,
   for (size_t i = 0; i < cands.size(); ++i)
     if (cands[i]) texts[i] = cands[i]->text;
   return content_scores_for_texts(question, texts);
+}
+
+// parse_llm_rerank_ids 实现（容错解析，语义见 bench.h 声明）：
+//   扫描 "E" + 十进制数字 token；数字越界（>n_cands）跳过；按首次出现去重；
+//   凑满 k 个即停。模型输出 NONE / 空串 / 纯解释 → 空 vector。
+std::vector<size_t> parse_llm_rerank_ids(const std::string& resp, size_t n_cands, size_t k) {
+  std::vector<size_t> out;
+  std::unordered_set<size_t> seen;
+  for (size_t i = 0; i < resp.size() && out.size() < k; ++i) {
+    if (resp[i] != 'E' && resp[i] != 'e') continue;
+    if (i + 1 >= resp.size() || resp[i + 1] < '0' || resp[i + 1] > '9') continue;
+    // 词边界：前一字符不得是字母/数字（防 "the" 里的 e 之类误配，E 前多为空白/行首）
+    if (i > 0 && (std::isalnum((unsigned char)resp[i - 1]) || resp[i - 1] == '_')) continue;
+    size_t j = i + 1, v = 0;
+    while (j < resp.size() && resp[j] >= '0' && resp[j] <= '9') {
+      v = v * 10 + (size_t)(resp[j] - '0');
+      if (v > n_cands) break;  // 越界前缀不再消耗（如 E123 对 n=20 取 E12 仍会越界跳过）
+      ++j;
+    }
+    if (v >= 1 && v <= n_cands && j == i + 1 + std::to_string(v).size() && seen.insert(v).second)
+      out.push_back(v - 1);  // 转 0 基池内下标
+  }
+  return out;
+}
+
+// LLM 重排（句级语义 spike，--llm-rerank N）：
+//   一次批量调用：给定问题与编号证据列表（dia_id + 首 200 字），让模型输出与问题
+//   最相关的前 k 个编号（允许"都不相关"）。返回选中的池内 0 基下标（≤k，LLM 序）；
+//   失败/空响应/无有效编号 → 空 vector，调用方降级为 BM25 原序。
+// 缓存防污染：prompt 含 question_id + 逐条 dia_id + 证据截断文本——不同题、同一题
+//   不同证据集（uid 噪声导致池序翻转）天然产生不同缓存键
+//   （DeepSeekClient 缓存键 = FNV-1a(模型+消息+选项)），与 answer/judge 缓存不撞。
+static std::vector<size_t> llm_rerank_select(ILlmClient& client, const BenchQuestion& q,
+                                             const std::vector<const Node*>& cands, size_t k) {
+  std::string list;
+  for (size_t i = 0; i < cands.size(); ++i) {
+    std::string snip = cands[i] ? cands[i]->text : "";
+    if (snip.size() > 200) snip.resize(200);  // 蓝方项：截断丢信息风险见报告
+    std::string dia;
+    if (cands[i]) {
+      auto it = cands[i]->attrs.find("dia_id");
+      if (it != cands[i]->attrs.end()) dia = it->second;
+    }
+    list += "E" + std::to_string(i + 1) + " [" + dia + "] " + snip + "\n";
+  }
+  const std::string prompt =
+      "你是检索重排器。给定一个问题（题号 " + q.id + "）和 " +
+      std::to_string(cands.size()) +
+      " 条编号证据（方括号内为来源标记，文本可能被截断）。\n"
+      "任务：选出对回答该问题最有用的证据，按相关度从高到低给出编号；"
+      "若证据都不相关，只输出 NONE。\n\n"
+      "问题: " +
+      q.question + "\n\n" + list + "\n只输出编号列表（形如: E3 E1 E7），最多 " +
+      std::to_string(k) + " 个，按相关度排序。不要输出任何解释。";
+  std::string resp = client.chat({{"user", prompt}}, {0.0, 1024, false});
+  if (resp.empty()) return {};  // 无网/失败：优雅降级
+  return parse_llm_rerank_ids(resp, cands.size(), k);
 }
 
 // ---- 两阶段检索（实体档案·检索角色修正，设计文档 8.3）----
@@ -469,6 +528,9 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
         for (size_t i : ord) reranked.push_back(ent.evidence_uids[i]);
         ent.evidence_uids = std::move(reranked);
       }
+      if (cfg.llm_rerank > 0 && cfg.llm_client)
+        std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
+                     q.id.c_str());
       return ent;
     }
   }
@@ -579,7 +641,43 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
     for (size_t i : ord) reranked.push_back(evs[i]);
     evs = std::move(reranked);
     top_content = cs[ord.front()];
+    // 句级语义 spike：LLM 重排（--llm-rerank N）——BM25 终排后、截 top-k 之前，
+    // 取前 N 条送一次 LLM 调用按句级相关度重选（其前 k 置顶，其余 BM25 原序补齐）。
+    // 失败/无有效编号 → 优雅降级 BM25 原序（日志标注）；默认 N=0 = 本段不执行。
+    if (cfg.llm_rerank > 0 && cfg.llm_client) {
+      size_t n = std::min<size_t>((size_t)cfg.llm_rerank, evs.size());
+      std::vector<const Node*> cands;
+      std::string cand_dias;  // 诊断：候选 dia_id 列表（金标是否进 top-N 的判定依据）
+      for (size_t i = 0; i < n; ++i) {
+        cands.push_back(evs[i]->event);
+        auto it = evs[i]->event->attrs.find("dia_id");
+        cand_dias += (i ? "," : "") + (it != evs[i]->event->attrs.end() ? it->second : "-");
+      }
+      std::vector<size_t> sel = llm_rerank_select(*cfg.llm_client, q, cands, (size_t)cfg.k);
+      if (sel.empty()) {
+        std::fprintf(stderr, "  [llm-rerank] %s: LLM 无有效输出，降级 BM25 原序 | 候选: %s\n",
+                     q.id.c_str(), cand_dias.c_str());
+      } else {
+        std::vector<char> used(evs.size(), 0);
+        std::vector<const ScoredEvent*> rr;
+        std::string sel_dias;
+        for (size_t s : sel) {
+          rr.push_back(evs[s]);
+          used[s] = 1;
+          auto it = evs[s]->event->attrs.find("dia_id");
+          sel_dias += (sel_dias.empty() ? "" : ",") +
+                      (it != evs[s]->event->attrs.end() ? it->second : "-");
+        }
+        for (size_t i = 0; i < evs.size(); ++i)
+          if (!used[i]) rr.push_back(evs[i]);
+        evs = std::move(rr);
+        std::fprintf(stderr, "  [llm-rerank] %s: LLM 置顶 %zu/%zu 条 | 选中: %s | 候选: %s\n",
+                     q.id.c_str(), sel.size(), n, sel_dias.c_str(), cand_dias.c_str());
+      }
+    }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
+  } else if (cfg.llm_rerank > 0 && cfg.llm_client) {
+    std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
   }
 
   ar.score = evs.empty() ? 0.0 : evs.front()->score;
