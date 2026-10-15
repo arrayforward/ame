@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 从 lexicon/lexicon_wordnet.json 提取全部词条（word 主词 + syn_strong/syn_near/antonyms
-# 三流的 key 与值），去重小写，一词一行写 bench/data/wordnet_words.txt。
+# 从 lexicon JSON 提取全部词条（word 主词 + syn_strong/syn_near/antonyms
+# 三流的 key 与值），去重小写，一词一行写提取器大词表。
 # 用途：bench --extractor-dict 的 M1 提取器大词表（英文场景；merged.txt 为中文词表）。
+# 用法: gen_wordnet_words.py [src.json] [out.txt]（默认 wordnet → wordnet_words.txt）
 import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "lexicon/lexicon_wordnet.json"
-OUT = ROOT / "bench/data/wordnet_words.txt"
+SRC = ROOT / (sys.argv[1] if len(sys.argv) > 1 else "lexicon/lexicon_wordnet.json")
+OUT = ROOT / (sys.argv[2] if len(sys.argv) > 2 else "bench/data/wordnet_words.txt")
 
 
 def main():

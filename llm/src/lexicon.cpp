@@ -118,6 +118,7 @@ static void write_lexicon(const std::string& out_path, int top_n, const Json& en
   std::ofstream f(out_path + ".tmp", std::ios::binary | std::ios::trunc);
   f << root.dump();
   f.close();
+  std::remove(out_path.c_str());  // Windows rename 不可覆盖已存在目标，先删再改名
   std::rename((out_path + ".tmp").c_str(), out_path.c_str());  // 原子落盘
 }
 

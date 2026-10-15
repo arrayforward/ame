@@ -29,6 +29,7 @@
 | `lexicon_zh2.json`（1.8MB） | 20,305 | 31,302 | 0 | 0 | funNLP `input/同义词.txt`（GBK 箭头对） |
 | `lexicon.json` | 2,910 | — | — | — | LoCoMo 语料词表 LLM 蒸馏（默认管线） |
 | `lexicon_gap.json` | 770 | — | — | — | WordNet 未覆盖高频词 LLM 补蒸馏 |
+| `lexicon_en.json` | 12,127 | 20,173 | 33,448 | 13,128 | bench 英文语料（locomo10×20 加权 + longmemeval_s）top 12,127 LLM 蒸馏（DeepSeek，383 次调用） |
 | `lexicon_src/` | — | — | — | — | 整理中间层：domain/（THUOCL 10 领域+IT+职业 163,181 词）、segmentation/merged.txt（9 个分词词典合并 678,211 词）、entities.txt（65,927 条 word\ttype）、manifest.json（逐文件解析报告） |
 
 ## 来源与许可

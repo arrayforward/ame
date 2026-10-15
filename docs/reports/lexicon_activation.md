@@ -276,3 +276,125 @@ test_extractor 33/33 子项通过）。注：本轮曾因 Windows 环境偶发�
 将 4 个改动文件 `git stash` 后重build，同一 off 命令连跑两次：
 **dump 不一致，覆盖率 0.448→0.443（Δ=-0.005，q32 翻转）——与带改动二进制完全同款的
 噪声签名**。基线固有非确定性定论，"逐字节一致"回归口径对该管线不可达，§4.1 口径成立。
+
+---
+
+## 10. 英文蒸馏：语料蒸馏词库的重建审判（2026-10-15 追加）
+
+> 动机：§9 根因显示 wordnet 资产无效的原因是"书面 lemma 与口语语料错位"。
+> 本节按"语料蒸馏、对口优先"重建英文词库，给词库路线一次完整的公平审判。
+
+### 10.1 词表（bench/data/en_vocab.txt）
+
+- 来源：`locomo10.json`（×20 加权，评测语料保护）+ 3 个 fixtures + `longmemeval_s_cleaned.json`
+  （500 题，2,090 万词元）。格式沿用 `build_lexicon_json` 输入契约
+  （`{"conv_vocab_top":[[w,f],...]}` JSON——任务书"一词一行 txt"与代码契约不一致，
+  以代码契约为准，扩展名保留 .txt）。
+- 过滤：纯 ASCII 小写词、len≥4、停用词（lex 通道 43 + 功能词；**不含** M1 提取停用词——
+  `like` 在问题中是真实内容词，M1 停用词表只作用于提取器不作用于 lex 通道）。
+- 规模：**12,127 词**（top 12,000 + locomo 原始词频≥3 覆盖保护 127 词）。
+- sample50 问题内容词 122 个，覆盖 113；缺失 9 个（3 专有名词、2 问题侧拼写错误
+  educaton/persue、4 个语料词频=1 的词），均为边际词。
+
+### 10.2 蒸馏（复用 build_lexicon_json，零 prompt 改动）
+
+- 前提验证：(a) API 健康探测通过（topn=2 冒烟，1 调用成功）；(b) 现有 prompt 本身即
+  英文导向（"为下列每个**英文**词生成词典条目"，syn_strong 约定含词形变化
+  painting→paint）——口语桥 like→[enjoy, **love**, fancy, prefer] 冒烟即得，
+  无需英文 prompt 变体。
+- 产出：`lexicon/lexicon_en.json` **12,127 条**（924KB；有 syn_strong 9,546、
+  syn_near 10,138、antonyms 6,217 流非空）。
+- 成本：首跑 383 次 API 调用 / 6m32s（243 批 + 截断翻倍重试，失败批 0，断点落盘）；
+  修复落盘 bug 后增量续跑 143 批全部缓存命中、0 新增调用。
+- **过程中修复真 bug**：`llm/src/lexicon.cpp` `write_lexicon` 的
+  `std::rename` 在 Windows 不可覆盖已存在目标 → 多 chunk 蒸馏每轮落盘静默失败、
+  out 文件永远落后一轮（本次首跑 12,127 条只落上 5,000 条）。修复为先删再改名；
+  该 bug 影响所有 Windows 上的多 chunk 蒸馏续跑，建议入主线。
+
+### 10.3 L2 层激活判决（预注册：≥60/219 有效）
+
+灌 `lexicon_en.json` 后复跑 dbg_lextrace 第 2 层调查：
+
+| 指标 | wordnet | en 蒸馏 |
+|---|---|---|
+| 别名表 | 103,905 | 9,413（applied=12,665） |
+| REL_SIMILAR / OPPOSITE 边 | 1,892 / 64 | 576 / 258 |
+| 有 variants 的内容词 | 114/219 | 71/219 |
+| **扩展词 df>0** | **17/219** | **17/219** |
+
+**预注册判决：未达 ≥60/219，词库路线按预注册判整体证伪。**
+
+但调查同时定位到一个压制蒸馏资产的管道断点：`apply_lexicon` 的 `alias_ok`
+守卫（防 wordnet 多义词链式改写设计）拒绝"同义词本身也是主词且不互指"的别名对——
+恰好吃掉蒸馏产物里最高频的口语桥 **8,094/20,173（40%）**：like→love/enjoy/fancy/
+prefer、great→excellent/wonderful、make→produce/build、kids→children 全部被拒。
+即 L2 指标测量的是"被守卫截肢后的资产"。按预注册纪律不重开实验翻案（避免移动门柱），
+将该断点记录为词库路线若要复活的唯一工程前提。
+
+### 10.4 端到端 A/B（sample50 基线模式，命令同 §4，--load-lexicon lexicon/lexicon_en.json）
+
+| 组 | 覆盖率 | Δ vs off | 逐题 |
+|---|---|---|---|
+| off | 0.448 | — | — |
+| en 灌库 | 0.443 | -0.005（噪声） | q32 翻转（已知噪声题） |
+| en 灌库 + extractor-dict（en_words.txt 28,068 词） | 0.443 | -0.005（噪声） | 与 en 灌库组逐题全同（+0.000） |
+| en 灌库 + dict + L2 混合终排 | 0.432 | -0.016 | q102↓/q14↑/q32↓（与 wordnet 版 L1+L2 完全同款翻转） |
+
+端到端无正信号，与 L2 层预注册判决一致。extractor-dict 再度逐题零差异——
+与 §3 结论一致：英文自由词元规则已覆盖 len≥4 词，大词表在查询侧没有边际。
+
+### 10.5 抽样质检（seed=42，随机 20 条，人工判读）
+
+```
+knead      | strong: massage,work            | near: manipulate:0.8,press:0.7,mix:0.6        | ant: -
+electric   | strong: -                       | near: electrical:0.9,dynamic:0.6               | ant: -
+size       | strong: dimension,magnitude     | near: proportion:0.8,scale:0.75                | ant: -
+optimizing | strong: perfecting,improving    | near: enhancing:0.8,refining:0.8               | ant: worsening,deteriorating
+homeless   | strong: unhoused,vagrant        | near: destitute:0.7,displaced:0.6              | ant: housed,settled
+equality   | strong: parity,sameness         | near: fairness:0.7,uniformity:0.6              | ant: inequality,disparity
+sushi      | strong: -                       | near: sashimi:0.7,maki:0.7,nigiri:0.7          | ant: -
+cherishing | strong: treasuring,prizing      | near: adoring:0.8,valuing:0.75                 | ant: neglecting,despising
+managing   | strong: administering,directing | near: controlling:0.8,coping:0.7               | ant: mismanaging
+fave       | strong: favorite,preferred      | near: beloved:0.8,cherished:0.75               | ant: least favorite,disliked
+insecticidal| strong: pesticidal,bug-killing | near: herbicidal:0.6,fungicidal:0.6            | ant: -
+giving     | strong: give,donating,presenting| near: offering:0.8,providing:0.8               | ant: taking,receiving,withholding
+sequoia    | strong: -                       | near: redwood:0.8,giant sequoia:0.9            | ant: -
+dispute    | strong: argue,debate            | near: contend:0.8,quarrel:0.7,challenge:0.7    | ant: agree,concur
+regular    | strong: normal,standard,usual   | near: common:0.8,routine:0.7                   | ant: irregular,abnormal,unusual
+month      | strong: -                       | near: period:0.6,term:0.5                      | ant: -
+four       | strong: -                       | near: -                                         | ant: -
+garage     | strong: -                       | near: carport:0.7,parking:0.6                  | ant: -
+chord      | strong: -                       | near: harmony:0.7,note:0.6,triad:0.6           | ant: -
+neil       | strong: -                       | near: -                                         | ant: -
+```
+
+判读：三流区分基本合理（strong 可互换/含词形变化：giving→give、fave→favorite；
+near 不可互换：garage→carport；ant 方向正确：dispute↔agree、homeless↔housed）；
+词形变化覆盖良好（cherishing/optimizing/managing 的 -ing 形→lemma 或同义 -ing）。
+噪声存在但低：knead→massage 偏松、sequoia 自环 near（giant sequoia）、
+个別数字/专名空词条（four/neil，符合 prompt 约定）。**资产质量本身合格——
+问题不在蒸馏，在灌库守卫与匹配方式。**
+
+### 10.6 最终判决：词库路线整体证伪（两次独立证伪，机制完备）
+
+- 重建审判结论：语料蒸馏资产质量合格（§10.5）、口语桥真实存在（like→love），
+  但 (a) `alias_ok` 守卫吃掉 40% 高频桥（§10.3），(b) 全链路 lemma 精确匹配
+  过不了 loves/loved 词形（§9 第 3 层），(c) 终排混合无信号（§10.4）。
+- 按预注册纪律：L2 指标 17/219 < 60 → **词库路线（蒸馏版）整体证伪，不再投**。
+- 资产处置：`lexicon_en.json` 与生成脚本保留入库（lexicon/README.md 资产总表可补一行）；
+  评测管线默认流程不带任何英文词库。若未来复活，工程前提有二：
+  ① `alias_ok` 守卫需区分"蒸馏互指"与"wordnet 多义"（如对蒸馏源放行主词对）；
+  ② M3/lex 通道需词形归一（loves→love）。
+- 附带主线建议：`write_lexicon` Windows rename 覆盖 bug 修复（§10.2）与
+  本任务无关但影响所有蒸馏续跑，建议随其它改动一并提交。
+
+### 改动清单（本节）
+
+- `llm/src/lexicon.cpp`：write_lexicon 落盘 Windows rename 覆盖修复（真 bug）。
+- `bench/scripts/gen_en_vocab.py`（新）：英文词频表生成（多语料加权 + 评测覆盖保护）。
+- `bench/scripts/gen_wordnet_words.py`：泛化为可传 src/out 参数（默认行为不变）。
+- `bench/data/en_vocab.txt`（新，12,127 词）、`bench/data/en_words.txt`（新，28,068 词）、
+  `lexicon/lexicon_en.json`（新，12,127 条）——入库；`*.ac`/bench/cache 不入库。
+- `bench/scripts/dbg_lextrace.cpp`：沿用（无改动）。
+- 运行产物：`bench/runs/lexicon_ab/{en,en_dict,en_dict_L2}.*`、`bench/runs/lexicon_en_distill{,2}.log`。
+- ctest **20/20 全绿**（llm 改动后全量 rebuild + ctest，11.82s）。
