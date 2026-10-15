@@ -196,8 +196,35 @@ static const CheapModel& load_cheap_model(const std::string& path) {
 
 // cheap_score_pool：对 BM25 终排后的全池逐候选算特征并打分，返回 0 基下标
 // 降序（模型序）。特征归一全部题内 minmax（与训练脚本同口径）；is_entity 由
-// 调用方传入的通道候选 uid 集合给出（训练数据该特征恒 0，模型权重≈0 安全外推）。
-static std::vector<size_t> cheap_score_pool(const CheapModel& m,
+// 调用方传入的通道候选 uid 集合给出（训练数据该特征恒 0，模型权重≈0 安全外推）；
+// ent_overlap = 问题专名 token（大写非句首，len≥2）出现在证据词集合中的比例
+// （词面特征：实体重合，无泄漏——标签来自 LLM，特征不含任何 LLM 产物）。
+static std::vector<std::string> question_entity_tokens(const std::string& question) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool sent_start = true;
+  auto flush = [&] {
+    if (cur.size() >= 2 && !sent_start && std::isupper((unsigned char)cur[0])) {
+      std::string low;
+      for (char c : cur) low += (char)std::tolower((unsigned char)c);
+      out.push_back(low);
+    }
+    cur.clear();
+  };
+  for (size_t i = 0; i <= question.size(); ++i) {
+    unsigned char c = i < question.size() ? (unsigned char)question[i] : 0;
+    if (c < 128 && std::isalnum(c)) {
+      cur += (char)c;
+    } else {
+      flush();
+      sent_start = (c == '.' || c == '!' || c == '?' || c == 0);
+    }
+    if (c == ' ') sent_start = false;  // 句中词
+  }
+  return out;
+}
+
+static std::vector<size_t> cheap_score_pool(const CheapModel& m, const std::string& question,
                                             const std::vector<const ScoredEvent*>& evs,
                                             const std::vector<double>& cs,
                                             const std::unordered_set<std::string>& entity_uids) {
@@ -234,8 +261,30 @@ static std::vector<size_t> cheap_score_pool(const CheapModel& m,
     rank_fu[ord_fu[r]] = 1.0 - (double)r / (double)(n - 1);
   }
   if (bm_max <= 0) bm_max = 1.0;
+  const std::vector<std::string> q_ents = question_entity_tokens(question);
   std::vector<std::pair<double, size_t>> scored(n);
   for (size_t i = 0; i < n; ++i) {
+    // 证据词集合（ASCII 小写切词，与 content_words 同口径）
+    std::unordered_set<std::string> ew;
+    {
+      std::string cur;
+      auto flush = [&] {
+        if (cur.size() >= 3) ew.insert(cur);
+        cur.clear();
+      };
+      for (unsigned char c : evs[i]->event->text) {
+        if (c < 128 && std::isalnum(c)) cur += (char)std::tolower(c);
+        else flush();
+      }
+      flush();
+    }
+    double ent_ov = 0.0;
+    if (!q_ents.empty()) {
+      int hit = 0;
+      for (auto& t : q_ents)
+        if (ew.count(t)) ++hit;
+      ent_ov = (double)hit / (double)q_ents.size();
+    }
     std::unordered_map<std::string, double> x = {
         {"bm25", cs[i]},
         {"bm25_rank", rank_bm[i]},
@@ -247,6 +296,7 @@ static std::vector<size_t> cheap_score_pool(const CheapModel& m,
         {"is_entity", entity_uids.count(evs[i]->event->uid) ? 1.0 : 0.0},
         {"recency", minmax(rec[i], r_lo, r_hi)},
         {"bm25_share", cs[i] / bm_max},
+        {"ent_overlap", ent_ov},
     };
     double z = m.bias;
     for (size_t k = 0; k < m.features.size(); ++k) z += m.weights[k] * x[m.features[k]];
@@ -290,6 +340,9 @@ std::vector<size_t> parse_llm_rerank_ids(const std::string& resp, size_t n_cands
 // 缓存防污染：prompt 含 question_id + 逐条 dia_id + 证据截断文本——不同题、同一题
 //   不同证据集（uid 噪声导致池序翻转）天然产生不同缓存键
 //   （DeepSeekClient 缓存键 = FNV-1a(模型+消息+选项)），与 answer/judge 缓存不撞。
+// llm_rerank_select：一次批量调用重选。prompt 含"词面精确命中必须保留靠前"
+// 指令（T3 A/B 胜出并入正形：0.646→0.667、13 救 0 失）——与 --rerank-guard
+// 执行侧兜底配套（指令防挤、guard 防漏）。
 static std::vector<size_t> llm_rerank_select(ILlmClient& client, const BenchQuestion& q,
                                              const std::vector<const Node*>& cands, size_t k) {
   std::string list;
@@ -310,7 +363,10 @@ static std::vector<size_t> llm_rerank_select(ILlmClient& client, const BenchQues
       "任务：选出对回答该问题最有用的证据，按相关度从高到低给出编号；"
       "若证据都不相关，只输出 NONE。\n\n"
       "问题: " +
-      q.question + "\n\n" + list + "\n只输出编号列表（形如: E3 E1 E7），最多 " +
+      q.question + "\n\n" + list +
+      "\n注意：若某条证据与问题存在关键词的精确重合（词面直接命中），"
+      "必须将其保留在靠前位置，不得因其他证据语义相近而挤掉它。"
+      "\n只输出编号列表（形如: E3 E1 E7），最多 " +
       std::to_string(k) + " 个，按相关度排序。不要输出任何解释。";
   std::string resp = client.chat({{"user", prompt}}, {0.0, 1024, false});
   if (resp.empty()) return {};  // 无网/失败：优雅降级
@@ -642,7 +698,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           for (size_t i : ord) reranked.push_back(ent.evidence_uids[i]);
           ent.evidence_uids = std::move(reranked);
         }
-        if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client)
+        if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap")
           std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
                        q.id.c_str());
         return ent;
@@ -822,13 +878,13 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
       }
       return sel_dias;
     };
-    // 句级语义 spike：LLM 重排（--llm-rerank N / --llm-rerank-all）——BM25 终排后、
-    // 截 top-k 之前，取前 N 条（--llm-rerank-all 时全池）送一次 LLM 调用按句级
-    // 相关度重选（其前 k 置顶，其余 BM25 原序补齐）。失败/无有效编号 → 优雅降级
-    // BM25 原序（日志标注）；LLM 与便宜近似皆关 = 本段不执行。
-    if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) {
-      size_t n = cfg.llm_rerank_all ? evs.size()
-                                    : std::min<size_t>((size_t)cfg.llm_rerank, evs.size());
+    // 句级语义终排三档（--rerank bm25|cheap|llm，默认 bm25 = 本段不执行）：
+    // llm = 全池/窗口 LLM 语义打分（-all 或 llm_rerank<=0 时全池）；cheap = 特征
+    // 逻辑重排器（零 LLM）；失败/无有效选中/模型缺失 → 均优雅降级 BM25 原序。
+    if (cfg.rerank_mode == "llm" && cfg.llm_client) {
+      size_t n = (cfg.llm_rerank_all || cfg.llm_rerank <= 0)
+                     ? evs.size()
+                     : std::min<size_t>((size_t)cfg.llm_rerank, evs.size());
       std::vector<const Node*> cands;
       std::string cand_dias;  // 诊断：候选 dia_id 列表（金标是否进 top-N 的判定依据）
       for (size_t i = 0; i < n; ++i) {
@@ -836,7 +892,8 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
         auto it = evs[i]->event->attrs.find("dia_id");
         cand_dias += (i ? "," : "") + (it != evs[i]->event->attrs.end() ? it->second : "-");
       }
-      std::vector<size_t> sel = llm_rerank_select(*cfg.llm_client, q, cands, (size_t)cfg.k);
+      std::vector<size_t> sel =
+          llm_rerank_select(*cfg.llm_client, q, cands, (size_t)cfg.k);
       if (sel.empty()) {
         std::fprintf(stderr, "  [llm-rerank] %s: LLM 无有效输出，降级 BM25 原序 | 候选: %s\n",
                      q.id.c_str(), cand_dias.c_str());
@@ -847,26 +904,31 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
                      q.id.c_str(), sel.size(), n, top_content, sel_dias.c_str(),
                      cand_dias.c_str());
       }
-    } else if (!cfg.cheap_rerank_path.empty()) {
-      // 便宜近似 v1：特征逻辑重排（零 LLM 零网络；模型加载失败 → 降级 BM25 原序）。
-      const CheapModel& m = load_cheap_model(cfg.cheap_rerank_path);
-      if (!m.ok) {
-        std::fprintf(stderr, "  [cheap-rerank] %s: 模型加载失败，降级 BM25 原序\n",
+    } else if (cfg.rerank_mode == "cheap") {
+      // 便宜近似 v1：特征逻辑重排（零 LLM 零网络；未配模型/加载失败 → 降级 BM25 原序）。
+      if (cfg.cheap_rerank_path.empty()) {
+        std::fprintf(stderr, "  [cheap-rerank] %s: cheap 档未配模型路径，降级 BM25 原序\n",
                      q.id.c_str());
       } else {
-        std::unordered_set<std::string> e_uids(entity_extra_uids.begin(),
-                                               entity_extra_uids.end());
-        auto order_c = cheap_score_pool(m, evs, cs, e_uids);
-        size_t kk = std::min<size_t>((size_t)cfg.k, order_c.size());
-        std::string sel_dias =
-            apply_selection(std::vector<size_t>(order_c.begin(), order_c.begin() + kk));
-        std::fprintf(stderr, "  [cheap-rerank] %s: 置顶 %zu/%zu 条 | 榜首内容分 %.3f | 选中: %s\n",
-                     q.id.c_str(), kk, evs.size(), top_content, sel_dias.c_str());
+        const CheapModel& m = load_cheap_model(cfg.cheap_rerank_path);
+        if (!m.ok) {
+          std::fprintf(stderr, "  [cheap-rerank] %s: 模型加载失败，降级 BM25 原序\n",
+                       q.id.c_str());
+        } else {
+          std::unordered_set<std::string> e_uids(entity_extra_uids.begin(),
+                                                 entity_extra_uids.end());
+          auto order_c = cheap_score_pool(m, q.question, evs, cs, e_uids);
+          size_t kk = std::min<size_t>((size_t)cfg.k, order_c.size());
+          std::string sel_dias =
+              apply_selection(std::vector<size_t>(order_c.begin(), order_c.begin() + kk));
+          std::fprintf(stderr,
+                       "  [cheap-rerank] %s: 置顶 %zu/%zu 条 | 榜首内容分 %.3f | 选中: %s\n",
+                       q.id.c_str(), kk, evs.size(), top_content, sel_dias.c_str());
+        }
       }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
-  } else if (((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) ||
-             !cfg.cheap_rerank_path.empty()) {
+  } else if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap") {
     std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
   }
 

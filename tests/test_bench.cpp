@@ -476,6 +476,7 @@ static void test_llm_rerank_channel() {
     cfg.use_entity_profile = false;  // 只验标准管道重排
     cfg.use_think = false;
     cfg.llm_rerank = 5;
+    cfg.rerank_mode = "llm";
     FakeLlmClient fake;
     fake.rules.push_back({"q-rerank-1", "E2"});
     cfg.llm_client = &fake;
@@ -491,6 +492,7 @@ static void test_llm_rerank_channel() {
     cfg.use_entity_profile = false;
     cfg.use_think = false;
     cfg.llm_rerank = 5;
+    cfg.rerank_mode = "llm";
     FakeLlmClient fake;
     fake.default_response = "";
     cfg.llm_client = &fake;
@@ -504,6 +506,7 @@ static void test_llm_rerank_channel() {
     cfg.use_entity_profile = false;
     cfg.use_think = false;
     cfg.llm_rerank = 5;
+    cfg.rerank_mode = "llm";
     FakeLlmClient fake;
     fake.default_response = "这些证据都不相关，无法回答。";
     cfg.llm_client = &fake;
@@ -592,7 +595,8 @@ static void test_llm_rerank_all() {
   BenchConfig cfg;
   cfg.use_entity_profile = false;
   cfg.use_think = false;
-  cfg.llm_rerank_all = true;  // llm_rerank=0 但全池开 → 通道生效
+  cfg.llm_rerank_all = true;  // 全池窗口
+  cfg.rerank_mode = "llm";
   FakeLlmClient fake;
   fake.rules.push_back({"q-rerank-all-1", "E2"});
   cfg.llm_client = &fake;
@@ -619,6 +623,7 @@ static void test_rerank_guard() {
   cfg.use_entity_profile = false;
   cfg.use_think = false;
   cfg.llm_rerank_all = true;
+  cfg.rerank_mode = "llm";
   FakeLlmClient fake;
   fake.rules.push_back({"q-guard-1", "E2"});  // LLM 误判 decoy 为相关
   cfg.llm_client = &fake;
@@ -660,6 +665,7 @@ static void test_cheap_rerank() {
   cfg.use_entity_profile = false;
   cfg.use_think = false;
   cfg.cheap_rerank_path = mpath;
+  cfg.rerank_mode = "cheap";
   // 组1：便宜重排 → 模型序替代 BM25 序，金标（低份额）居首
   {
     auto r = answer(e, q, cfg);
@@ -674,6 +680,44 @@ static void test_cheap_rerank() {
     const Node* front = e.storage().get_node(r.evidence_uids.front());
     CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
   }
+}
+
+// 模式门控：bm25 档（默认）即使有 LLM 客户端/全池标志也不触发重排（Fake 零调用）；
+// cheap 档未配模型路径 → 日志降级、行为 = BM25 原序。
+static void test_rerank_mode_gating() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");
+  BenchQuestion q;
+  q.id = "q-mode-gate";
+  q.question = "What book was recommended to Melanie?";
+  BenchConfig cfg;
+  cfg.use_entity_profile = false;
+  cfg.use_think = false;
+  // bm25 档：全池标志 + 客户端齐备也不得触发（模式互斥于参数）
+  cfg.llm_rerank_all = true;
+  cfg.rerank_mode = "bm25";
+  FakeLlmClient fake;
+  fake.default_response = "E2";  // 若误触发会把金标置顶——断言不触发
+  cfg.llm_client = &fake;
+  auto r = answer(e, q, cfg);
+  CHECK(fake.received.empty());
+  const Node* front = e.storage().get_node(r.evidence_uids.front());
+  CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
+  // cheap 档未配路径 → 降级 BM25 原序（Fake 同样零调用）
+  BenchConfig cfg2;
+  cfg2.use_entity_profile = false;
+  cfg2.use_think = false;
+  cfg2.rerank_mode = "cheap";
+  cfg2.llm_client = &fake;
+  auto r2 = answer(e, q, cfg2);
+  CHECK(fake.received.empty());
+  const Node* front2 = e.storage().get_node(r2.evidence_uids.front());
+  CHECK(front2 && front2->attrs.count("dia_id") && front2->attrs.at("dia_id") == "D2:1");
 }
 
 int main() {
@@ -694,6 +738,7 @@ int main() {
   test_entity_pass_through();
   test_rerank_guard();
   test_cheap_rerank();
+  test_rerank_mode_gating();
   test_parse_session_date();
   test_store_adapters();
   return AME_TEST_REPORT();

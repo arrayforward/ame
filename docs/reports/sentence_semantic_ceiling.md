@@ -481,3 +481,132 @@ question_id 分组（GroupKFold）。
 - ctest **20/20 全绿**。运行产物：`bench/runs/mechanisms/` 下
   m12_cal / m12_guard / cheap_r1 / cheap_r2 / pools50 / cheap_model.json
   （均 gitignored）。
+
+
+---
+
+## 17. 双模式终排开关一等公民化（--rerank bm25|cheap|llm）
+
+**动机**：rerank 相关开关碎片化（--final-alpha/--llm-rerank/--llm-rerank-all/
+--cheap-rerank/--rerank-guard），语义交叠。统一为显式模式开关：
+
+| 档 | 语义 | 资源 |
+|---|---|---|
+| `bm25`（默认） | 纯词面终排 | 零 LLM 零模型（现状行为） |
+| `cheap` | 特征逻辑重排器 | 零 LLM 有模型（无网兜底） |
+| `llm` | 全池/窗口 LLM 语义打分 | 有 LLM（--rerank llm 未指定窗口默认全池） |
+
+- 旧开关保留为**兼容别名**（文档标注 deprecated）：`--llm-rerank N`(N>0) /
+  `--llm-rerank-all` → llm 档（窗口参数）；`--cheap-rerank PATH` → cheap 档。
+- **互斥解析**：显式 `--rerank` 与别名请求不同档 → 报错退出（不猜优先级），
+  同档可叠加（如 --rerank llm --llm-rerank 20 = llm 档窗口 20）；未知档名报错。
+- **横切配套**：--rerank-guard / --entity-pass-threshold 各档通用
+  （guard 在 cheap 档同样经 apply_selection 生效）。
+- 单测：`test_rerank_mode_gating`（bm25 档有客户端/全池标志也不触发，
+  Fake 零调用；cheap 档未配路径降级）+ 全部旧 rerank 测试迁移模式 API；
+  ctest 20/20。
+
+## 18. 调优轮（T1-T4，全部预注册先写后跑）
+
+### T1 guard 阈值敏感性（每值完整 A/B，LLM 全池 + pass 0.5）
+
+| 阈值 | 覆盖率 | Δ | 救回 | 丢失 | 锁定题数 |
+|---|---|---|---|---|---|
+| 0.15 | 0.635 | +0.193 | 11（缺 q24） | 0 | ~18 |
+| **0.20** | **0.646** | **+0.203** | **12（全）** | **0** | ~13 |
+| 0.25 | 0.583 | +0.141 | 10 | **q100、q59** | ~8 |
+
+**选定 0.2**。敏感性解读：0.25 侧崩（q100=0.213 恰在 0.2~0.25 之间，阈值上移
+即失锁）→ **上侧余量仅 0.013 是样本内事实，换样本可能位移**；0.15 侧代价
+温和（-1 题）。0.2 位于 p25(0.170) 与 q100(0.213) 之间偏中，是三点中
+"翻转最少+容错最宽"的选择；不选最大值逻辑而选稳健逻辑在本例与最优点
+重合，如实披露。
+
+### T2 cheap 档调优（目标：兜底抬向 m2 的 0.526，非翻案）
+
+- 新特征 **ent_overlap** = 问题专名 token（大写非句首 len≥2，与实体通道
+  同口径）出现在证据词集合中的比例。词面特征，无泄漏（标签来自 LLM）。
+  训练后该特征权重 **-0.67**（负向！）：LLM 选中的是**不含实体名的改述
+  金标**，专名重合证据恰是 BM25 已覆盖的"简单词面命中"——特征价值在
+  "惩罚"而非"奖励"。
+- 交叉验证：AUC 0.699→**0.710**，正例 top-10 召回 0.507→**0.514**
+  （ imitation 指标微升，任务指标放大）。
+- 端到端（零 API，两次复跑）：**0.573 / 0.536**（v1 = 0.484~0.490），
+  +0.06~0.09；r1 时 B 类 3/4（q101/q154/q155）。r1 触预注册线（≥0.55 且
+  ≥3/4）、r2 未触（0.536<0.55）——噪声带跨线。
+- **判决：维持 v1 结论不翻案**（句级承载句级判断），但 cheap 档可用性
+  大幅改善：无网兜底从 0.484 提到 **0.54~0.57 带**，已持平/超过 m2 单独的
+  0.526。cheap 档定位从"实验残骸"升级为"合格兜底"。
+
+### T3 LLM prompt 小消融（预注册：变体 ≥ 现版才换）
+
+- 变体 = 指令追加"若某证据与问题存在关键词的精确重合（词面直接命中），
+  必须将其保留在靠前位置，不得因其他证据语义相近而挤掉它"。
+- A/B（同配置 guard 0.2）：现版 0.646/12 救 0 失 vs 变体 **0.667/13 救
+  0 失**（新增 q156——A 类题金标被 LLM 直接选中入 top-k）。
+- 变体 ⊇ 现版救回集且覆盖率更高 → **按预注册换为正形**（pin 指令并入
+  唯一 prompt，旧版经 git 历史可复现）。
+
+### T4 冻结配置确认（两次复跑，judge llm）
+
+冻结配置（推荐档，命令行全文）：
+
+```bash
+./build-win/bench/ame_bench.exe --dataset locomo --data bench/data/locomo10.json \
+  --question-ids bench/data/locomo_sample50.json --extractor rule --answer baseline \
+  --judge llm --k 10 \
+  --entity-pass-threshold 0.5 --rerank llm --rerank-guard 0.2
+```
+
+| 复跑 | 覆盖率 | Δ | any-hit | judge | api_calls（含 judge） |
+|---|---|---|---|---|---|
+| freeze r1 | 0.630 | +0.188 | 35/48 | 0.400 | 73（缓存命中 27） |
+| freeze r2 | 0.672 | +0.229 | 37/48 | 0.420 | 61（缓存命中 39） |
+
+- 噪声带 0.630~0.672（±0.02~0.04，uid 噪声 + q1/q153 型边界翻转），
+  0 丢失题；judge 0.40~0.42（基线路径 0.080）。
+- **全量前冻结**：覆盖率 ≈ **0.65**（+0.21 vs off 0.443），judge ≈ **0.41**，
+  0 丢失。对照 journey：off 0.448 → m2 0.526 → m12 0.604 → +guard 0.646 →
+  +prompt 正形 **0.65 带**。
+- 备选档：cheap（`--rerank cheap --cheap-rerank cheap_model_v2.json
+  --entity-pass-threshold 0.5`）= 0.54~0.57 带，零 LLM 兜底。
+
+## 19. 蓝方自检（本轮追加）
+
+1. **模式开关与旧开关并存的歧义面**：解析顺序无关（收集后消解），歧义
+   只剩"同档多参数叠加"（如 --rerank llm --cheap-rerank x → 互斥报错，
+   因映射到不同档）；`--llm-rerank 0`（历史关语义）不请求任何模式 →
+   bm25 默认，与旧行为一致（0 即关）。别名永不再文档首页出现（usage
+   标注 deprecated），新脚本一律用 --rerank。
+2. **guard 扫参的多重比较风险**：三值只选其一，选据是"两侧容错"而非
+   最大覆盖率（0.2 恰为最优点，已披露其与稳健判据重合；上侧余量 0.013
+   的样本依赖写入 §18-T1，全量评测若 guard 失效应优先复查此处）。
+3. **T2 新特征泄漏复查**：ent_overlap 全部来自问题文本（大写 token）与
+   证据文本（词集合），零 LLM 产物；标签仍只来自 m12 日志。负向权重
+   方向与机制理解一致（改述金标不含量词专名），非训练噪声
+   （两折 AUC 均 >0.65）。
+4. **prompt 变体的归因边界**：T3 变体与 guard 0.2 同时生效——变体的
+   增益（+0.021）是在 guard 已兜底之上的增量（q156 是 LLM 主动选中，
+   guard 无涉），归因干净；但"pin 指令 + guard"双保险可能在别的样本
+   上过度保守（词面命中弱的相关证据被双重压前），全量时需盯"丢失"集合。
+5. **cheap v2 触线未翻案的口径**：预注册线是"≥0.55 且 B 类 ≥3/4 成立"
+   ——r1 触线但 r2 未触，按"噪声带跨线不翻案"纪律维持 v1 结论；
+  如实报告 cheap 档的实际定位变化（兜底可用性成立）。
+
+## 20. 改动清单（本节）
+
+- `bench/include/ame/bench/bench.h`：BenchConfig + `rerank_mode`（默认
+  bm25）；删 `llm_prompt_pin`（变体并入正形）。
+- `bench/src/ingest_answer.cpp`：重排段改模式分支（llm/cheap/bm25 默认
+  不执行）；`apply_selection` 共用；llm 档默认全池窗口；prompt 并入 pin
+  指令；`cheap_score_pool` + ent_overlap 特征 + question 参数。
+- `bench/cli/main.cpp`：`--rerank bm25|cheap|llm` + 别名映射 + 互斥消解
+  （冲突/未知档报错）；need_llm 按模式；usage/lmem 忽略清单同步；
+  删 --llm-prompt-pin。
+- `tests/test_bench.cpp`：既有 rerank 测试迁移模式 API；新增
+  `test_rerank_mode_gating`；ctest **20/20 全绿**。
+- `bench/scripts/cheap_rerank_train.py`：ent_overlap 特征（与 C++ 同口径的
+  question_entity_tokens/text_words）+ 全量权重。
+- 运行产物：`bench/runs/mechanisms/` 下 t1_guard_{0.15,0.2,0.25}、
+  t2_cheap_v2_r{1,2}、t3_pin、t4_freeze_r{1,2}（均 gitignored）。
+- 本轮 API：T1 3×~44 + T3 ~50 + T4 ~134（含 judge，缓存命中递减）≈ 320 次。

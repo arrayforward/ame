@@ -15,7 +15,43 @@ import random
 import re
 
 FEATURES = ["bm25", "bm25_rank", "fusion", "graph", "ctx", "time", "fusion_rank",
-            "is_entity", "recency", "bm25_share"]
+            "is_entity", "recency", "bm25_share", "ent_overlap"]
+
+
+def question_entity_tokens(question):
+    """问题专名 token（大写非句首 len≥2，小写化）——与 ingest_answer.cpp 同口径。"""
+    out, cur, sent_start = [], "", True
+
+    def flush():
+        nonlocal cur, sent_start
+        if len(cur) >= 2 and not sent_start and cur[0].isupper():
+            out.append(cur.lower())
+        cur = ""
+
+    for ch in question + "\x00":
+        if ch.isascii() and ch.isalnum():
+            cur += ch
+        else:
+            flush()
+            sent_start = ch in ".!?\x00"
+        if ch == " ":
+            sent_start = False
+    return out
+
+
+def text_words(text):
+    """ASCII 小写切词 len≥3（content_words 同口径）。"""
+    words, cur = set(), ""
+    for ch in text:
+        if ch.isascii() and ch.isalnum():
+            cur += ch.lower()
+        else:
+            if len(cur) >= 3:
+                words.add(cur)
+            cur = ""
+    if len(cur) >= 3:
+        words.add(cur)
+    return words
 B_GOLD = {"conv-26:q10": "D3:13", "conv-26:q101": "D5:8",
           "conv-26:q154": "D2:12", "conv-26:q155": "D2:12"}
 
@@ -53,6 +89,8 @@ def build_pairs(pools_path, labels):
         bm25 = [p["bm25"] for p in pool]
         fus = [p["fusion"] for p in pool]
         tss = [p["ts"] for p in pool]
+        q_ents = question_entity_tokens(r["question"])
+        pool_words = [text_words(p["text"]) for p in pool]
         order_bm = sorted(range(n), key=lambda i: -bm25[i])
         order_fu = sorted(range(n), key=lambda i: -fus[i])
         rank_bm = {i: r_ for r_, i in enumerate(order_bm)}
@@ -83,7 +121,8 @@ def build_pairs(pools_path, labels):
                  1.0 - rank_fu[i] / (n - 1),
                  0.0,  # is_entity：标准池恒 0（合并候选未入训练池，见报告）
                  mm([-t for t in tss], i),
-                 bm25[i] / max_bm]
+                 bm25[i] / max_bm,
+                 (sum(1 for t in q_ents if t in pool_words[i]) / len(q_ents)) if q_ents else 0.0]
             pairs.append((x, y, qid))
     return pairs, stats
 

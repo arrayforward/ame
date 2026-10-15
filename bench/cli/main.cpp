@@ -65,6 +65,7 @@ struct Cli {
   double entity_pass = -1.0;   // --entity-pass-threshold X：实体通道低置信放行（<0=关=现状）
   double rerank_guard = -1.0;  // --rerank-guard X：BM25 强命中豁免 LLM 重排（<0=关=现状）
   std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
+  std::string rerank_mode;     // --rerank bm25|cheap|llm（空=未显式指定，由别名/默认推定）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -123,6 +124,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--entity-pass-threshold") cli.entity_pass = std::atof(next().c_str());
     else if (a == "--rerank-guard") cli.rerank_guard = std::atof(next().c_str());
     else if (a == "--cheap-rerank") cli.cheap_rerank = next();
+    else if (a == "--rerank") cli.rerank_mode = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -170,9 +172,11 @@ void usage() {
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
                "      [--name-alias FILE]（graph：人名/专名严等价别名表 names_zh.json，\n"
                "       摄入前灌入 M3 别名+M1 词面+M2 实体，默认关）\n"
-               "      [--llm-rerank N]（graph：句级语义 LLM 重排，BM25 终排截 top-k 前取\n"
-               "       前 N 证据一次 LLM 调用重选；0=关默认；失败优雅降级 BM25 原序）\n"
-               "      [--llm-rerank-all]（graph：重排窗口扩为全池 k_pool，裸开关默认关）\n"
+               "      [--rerank bm25|cheap|llm]（graph：终排模式；默认 bm25=纯词面。\n"
+               "       cheap=特征重排器零LLM需 --cheap-rerank PATH；llm=全池LLM打分）\n"
+               "      [兼容别名·deprecated] --llm-rerank N / --llm-rerank-all / --cheap-rerank\n"
+               "       PATH（映射到 --rerank；与 --rerank 不同档并用报互斥错）\n"
+               "      [--llm-prompt-pin]（llm 档 prompt 变体：词面精确命中必须保留靠前）\n"
                "      [--entity-pass-threshold X]（graph：实体档案通道低置信放行——通道榜首\n"
                "       内容分 < X 时候选并入标准管道池；默认 -1=关=现状；建议实验值 0.5）\n"
                "      [--rerank-guard X]（graph：LLM 重排时 BM25 榜首内容分 ≥ X 则豁免、\n"
@@ -192,6 +196,34 @@ int main(int argc, char** argv) {
   cli.cfg.entity_pass_threshold = cli.entity_pass;  // --entity-pass-threshold（默认 -1=现状）
   cli.cfg.rerank_guard = cli.rerank_guard;          // --rerank-guard（默认 -1=关）
   cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
+
+  // ---- 终排模式消解（--rerank bm25|cheap|llm 一等公民；旧开关为兼容别名）----
+  // 互斥：显式 --rerank 与别名开关（--llm-rerank N>0 / --llm-rerank-all / --cheap-rerank）
+  // 请求不同档 → 报错退出（不猜优先级）；同档可叠加（参数合并，-all 优先窗口）。
+  {
+    std::unordered_set<std::string> modes;
+    std::string req;
+    auto add = [&](const std::string& m, const char* from) {
+      modes.insert(m);
+      req += std::string(req.empty() ? "" : ",") + from + "→" + m;
+    };
+    if (!cli.rerank_mode.empty()) add(cli.rerank_mode, "--rerank");
+    if (cli.llm_rerank > 0) add("llm", "--llm-rerank");
+    if (cli.llm_rerank_all) add("llm", "--llm-rerank-all");
+    if (!cli.cheap_rerank.empty()) add("cheap", "--cheap-rerank");
+    if (modes.size() > 1) {
+      std::fprintf(stderr, "终排模式互斥冲突: %s（请只保留一个模式开关）\n", req.c_str());
+      return 1;
+    }
+    std::string mode = modes.empty() ? "bm25" : *modes.begin();
+    if (mode != "bm25" && mode != "cheap" && mode != "llm") {
+      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|llm）\n", mode.c_str());
+      return 1;
+    }
+    if (mode == "llm" && !cli.llm_rerank_all && cli.llm_rerank <= 0)
+      cli.llm_rerank_all = true;  // --rerank llm 未指定窗口 → 默认全池（机制2正形）
+    cli.cfg.rerank_mode = mode;
+  }
 
   // 词典构建模式：--build-lexicon <vocab_freq.json> [--lexicon-out PATH] [--lexicon-topn N]
   if (!cli.build_lexicon.empty()) {
@@ -333,10 +365,9 @@ int main(int argc, char** argv) {
     mark("word-sim", !cli.word_sim_path.empty());
     mark("name-alias", !cli.name_alias.empty());
     mark("llm-rerank", cli.llm_rerank > 0);
-    mark("llm-rerank-all", cli.llm_rerank_all);
+    mark("rerank", cli.cfg.rerank_mode != "bm25");
     mark("entity-pass-threshold", cli.entity_pass >= 0.0);
     mark("rerank-guard", cli.rerank_guard >= 0.0);
-    mark("cheap-rerank", !cli.cheap_rerank.empty());
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);
@@ -368,7 +399,7 @@ int main(int argc, char** argv) {
   std::unique_ptr<LlmJudge> llm_judge;
   RuleExtractor rule_ext;
   bool need_llm = cli.cfg.extractor_mode == "llm" || cli.cfg.answer_mode == "llm" ||
-                  cli.cfg.judge_mode == "llm" || cli.llm_rerank > 0 || cli.llm_rerank_all;
+                  cli.cfg.judge_mode == "llm" || cli.cfg.rerank_mode == "llm";
   if (need_llm) {
     std::filesystem::create_directories(cli.cfg.cache_dir);
     client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model, cli.cfg.cache_dir);

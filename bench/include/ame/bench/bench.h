@@ -100,6 +100,13 @@ struct BenchConfig {
   // 正确 top-1 被 LLM 挤走的回退修复）。11 救题的金标位于 BM25 11~27 位、
   // 不受首槽锁定影响（LLM 选中序 1/2/1/1 → 锁定后最多后移一位仍在 top-k）。
   double rerank_guard = -1.0;               // <0 = 关闭；建议实验值 0.8（本 benchmark 实测需按 §13 校准）
+  // ---- 双模式终排开关（--rerank bm25|cheap|llm，默认 bm25=现状）----
+  // bm25 = 纯词面终排（零 LLM 零模型）；cheap = 特征逻辑重排器（零 LLM 有模型，
+  // 无网兜底，需 cheap_rerank_path）；llm = 全池/窗口 LLM 语义打分（需 llm_client）。
+  // 旧开关（--llm-rerank/--llm-rerank-all/--cheap-rerank）为兼容别名，CLI 映射进
+  // 本字段；guard/entity-pass 为横切配套，各档通用。llm_rerank/llm_rerank_all
+  // 在 llm 档内作窗口参数（-all = 全池）。
+  std::string rerank_mode = "bm25";
   // ---- 便宜近似 v1：特征逻辑重排器（--cheap-rerank PATH，默认空=关）----
   // 用训练好的逻辑回归模型（cheap_rerank_train.py 产出 JSON）对全池按引擎现成
   // 特征打分替代 LLM 全池打分（推理零 LLM 零网络）；与 LLM 重排并存时 LLM 优先。
