@@ -10,3 +10,5 @@ bench/data/longmemeval_s_cleaned.json
 bench/data/locomo10.json
 # 本地验证构建树（winlibs 工具链）
 build-win/
+*.ac
+__pycache__/
