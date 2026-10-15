@@ -18,6 +18,7 @@ namespace ame {
 
 class Engine;
 class IExtractor;
+class ILlmClient;
 
 // ---- 统一中间表示 ----
 struct BenchTurn {
@@ -83,6 +84,16 @@ struct BenchConfig {
   // 蒸馏边 0.3-1.0、反义弱边 0.35），m 按 ≥0.5 计；旁路 expand_of 两档。
   const class WordEdgeTable* word_edges = nullptr;
 
+  // ---- 句级语义 spike：LLM 重排通道（--llm-rerank N，默认 0=关=历史行为）----
+  // 标准管道证据终排（内容词 BM25，含 think 并入）截 top-k 之前：取终排序 top-N
+  // 证据（带 dia_id 与首 200 字）做一次 LLM 调用，按其返回的编号序把前 k 个置顶
+  // 进 evidence，其余按 BM25 原序补齐；调用失败/无有效编号 → 优雅降级为 BM25
+  // 原序（stderr 标注）。LLM 调用走 DeepSeekClient 磁盘缓存（prompt 含题 id 与
+  // 证据集内容，缓存键天然防污染），复跑零成本。仅标准管道生效；实体档案通道
+  // 提前返回，不经过此处。
+  int llm_rerank = 0;                       // 重排候选名额（BM25 终排序 top-N）
+  ILlmClient* llm_client = nullptr;         // main 注入；空指针 = 通道关闭
+
   // ---- LLM 管线配置（任务二）----
   std::string extractor_mode = "rule";    // rule|llm（llm 按会话批量提取）
   std::string answer_mode = "baseline";   // baseline|llm
@@ -130,5 +141,10 @@ struct AnswerResult {
   long query_id = 0;   // M11 埋点 id（引擎反馈采集启用时非 0）
 };
 AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& cfg);
+
+// LLM 重排响应解析（容错，导出供单测）：从模型输出提取 E<num> 编号序——
+// 按出现顺序、去重、限 1..n_cands、截前 k 个；无任何有效编号（含 NONE/空响应）
+// 返回空 vector = 降级为 BM25 原序的信号。编号外文本（解释、markdown 等）不影响。
+std::vector<size_t> parse_llm_rerank_ids(const std::string& resp, size_t n_cands, size_t k);
 
 }  // namespace ame
