@@ -526,6 +526,83 @@ static void test_llm_rerank_channel() {
   }
 }
 
+// 机制1 实体通道低置信放行（--entity-pass-threshold）：
+//   通道榜首内容分 < 阈值 → 不整通道返回，候选并入标准管道池（去重）继续流程；
+//   默认 -1（关）→ 整通道返回现状；槽位直查恒 1.0 永远高置信（隐式覆盖）。
+static void test_entity_pass_through() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "My hobby is pottery, and this hobby keeps me busy.", ts0,
+                  "D1:1", "s1");  // 通道候选：hobby ×2 → 内容分 ≈0.16（<0.15 会弃权，≥0.15 低置信）
+  e.remember_turn("Melanie", "I went hiking with friends last weekend.", ts0 + 60, "D1:2",
+                  "s1");  // 池内同伴事件：问题内容词零命中
+  BenchQuestion q;
+  q.id = "q-pass-1";
+  q.question = "About Melanie zqzx hobby?";  // 内容词 about/zqzx/hobby：hobby 命中 → 通道分≈0.16（低置信带）
+
+  // 组1：默认（阈值 -1 = 关）→ 整通道返回现状：证据仅通道候选 D1:1
+  {
+    BenchConfig cfg;  // entity_pass_threshold 默认 -1
+    cfg.use_think = false;
+    auto r = answer(e, q, cfg);
+    CHECK(!r.abstained);
+    // 通道整返回：1 条 dia_id 证据 + 会话标记 S:s1（answer_entity_channel 双标记惯例）
+    CHECK(r.evidence_dia_ids.size() == 2 && r.evidence_dia_ids[0] == "D1:1" &&
+          r.evidence_dia_ids[1] == "S:s1");
+  }
+  // 组2：阈值 0.5 → 低置信放行：标准管道接管，通道候选并入池（D1:2 经实体扩散也入池）
+  {
+    BenchConfig cfg;
+    cfg.use_think = false;
+    cfg.entity_pass_threshold = 0.5;
+    auto r = answer(e, q, cfg);
+    CHECK(!r.abstained);
+    bool has_d11 = false, has_d12 = false;
+    for (auto& d : r.evidence_dia_ids) {
+      if (d == "D1:1") has_d11 = true;
+      if (d == "D1:2") has_d12 = true;
+    }
+    CHECK(has_d11);  // 通道候选不丢（并入标准池）
+    CHECK(has_d12);  // 标准管道自身取证在放行后生效（整通道返回时 D1:2 不可见）
+  }
+  // 组3：阈值 0 且通道弃权情形不回归——低分通道（<0.15）本来就走标准管道
+  {
+    BenchConfig cfg;
+    cfg.use_think = false;
+    cfg.entity_pass_threshold = 0.0;  // 0.16 ≥ 0 → 仍整通道返回
+    auto r = answer(e, q, cfg);
+    CHECK(!r.abstained);
+    CHECK(r.evidence_dia_ids.size() == 2 && r.evidence_dia_ids[0] == "D1:1" &&
+          r.evidence_dia_ids[1] == "S:s1");
+  }
+}
+
+// 机制2 全池 LLM 重排（--llm-rerank-all）：窗口从 top-N 扩为全池；与 --llm-rerank 并存时全池优先。
+static void test_llm_rerank_all() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");  // 金标：词面弱匹配
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");  // decoy：词面高频命中
+  BenchQuestion q;
+  q.id = "q-rerank-all-1";
+  q.question = "What book was recommended to Melanie?";
+  BenchConfig cfg;
+  cfg.use_entity_profile = false;
+  cfg.use_think = false;
+  cfg.llm_rerank_all = true;  // llm_rerank=0 但全池开 → 通道生效
+  FakeLlmClient fake;
+  fake.rules.push_back({"q-rerank-all-1", "E2"});
+  cfg.llm_client = &fake;
+  auto r = answer(e, q, cfg);
+  CHECK(!r.evidence_uids.empty());
+  const Node* front = e.storage().get_node(r.evidence_uids.front());
+  CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D1:1");
+  // 默认（全池关、N=0）→ 通道关闭（与 test_llm_rerank_channel 组4 同语义，不再重复断言）
+}
+
 int main() {
   test_load_fixtures();
   test_ingest_graph();
@@ -540,6 +617,8 @@ int main() {
   test_evidence_content_rerank();
   test_llm_rerank_parse();
   test_llm_rerank_channel();
+  test_llm_rerank_all();
+  test_entity_pass_through();
   test_parse_session_date();
   test_store_adapters();
   return AME_TEST_REPORT();

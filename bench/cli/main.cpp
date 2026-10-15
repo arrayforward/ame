@@ -61,6 +61,8 @@ struct Cli {
   std::string name_alias;      // --name-alias FILE：人名/专名严等价别名表（names_zh.json，
                                // 摄入前加载；M3 别名+M1 词面+M2 实体三通道贯通，默认空=关）
   int llm_rerank = 0;          // --llm-rerank N：句级语义 LLM 重排名额（0=关，默认 20 实验值）
+  bool llm_rerank_all = false; // --llm-rerank-all on|off：重排窗口扩为全池（默认关）
+  double entity_pass = -1.0;   // --entity-pass-threshold X：实体通道低置信放行（<0=关=现状）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -115,6 +117,8 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--word-edges") cli.word_sim_path = next();
     else if (a == "--name-alias") cli.name_alias = next();
     else if (a == "--llm-rerank") cli.llm_rerank = std::atoi(next().c_str());
+    else if (a == "--llm-rerank-all") cli.llm_rerank_all = true;  // 裸开关（默认关）
+    else if (a == "--entity-pass-threshold") cli.entity_pass = std::atof(next().c_str());
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -164,6 +168,9 @@ void usage() {
                "       摄入前灌入 M3 别名+M1 词面+M2 实体，默认关）\n"
                "      [--llm-rerank N]（graph：句级语义 LLM 重排，BM25 终排截 top-k 前取\n"
                "       前 N 证据一次 LLM 调用重选；0=关默认；失败优雅降级 BM25 原序）\n"
+               "      [--llm-rerank-all]（graph：重排窗口扩为全池 k_pool，裸开关默认关）\n"
+               "      [--entity-pass-threshold X]（graph：实体档案通道低置信放行——通道榜首\n"
+               "       内容分 < X 时候选并入标准管道池；默认 -1=关=现状；建议实验值 0.5）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -173,6 +180,8 @@ void usage() {
 int main(int argc, char** argv) {
   Cli cli = parse_args(argc, argv);
   cli.cfg.llm_rerank = cli.llm_rerank;  // --llm-rerank N → BenchConfig（0=关）
+  cli.cfg.llm_rerank_all = cli.llm_rerank_all;      // --llm-rerank-all（默认关）
+  cli.cfg.entity_pass_threshold = cli.entity_pass;  // --entity-pass-threshold（默认 -1=现状）
 
   // 词典构建模式：--build-lexicon <vocab_freq.json> [--lexicon-out PATH] [--lexicon-topn N]
   if (!cli.build_lexicon.empty()) {
@@ -314,6 +323,8 @@ int main(int argc, char** argv) {
     mark("word-sim", !cli.word_sim_path.empty());
     mark("name-alias", !cli.name_alias.empty());
     mark("llm-rerank", cli.llm_rerank > 0);
+    mark("llm-rerank-all", cli.llm_rerank_all);
+    mark("entity-pass-threshold", cli.entity_pass >= 0.0);
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);
@@ -345,7 +356,7 @@ int main(int argc, char** argv) {
   std::unique_ptr<LlmJudge> llm_judge;
   RuleExtractor rule_ext;
   bool need_llm = cli.cfg.extractor_mode == "llm" || cli.cfg.answer_mode == "llm" ||
-                  cli.cfg.judge_mode == "llm" || cli.llm_rerank > 0;
+                  cli.cfg.judge_mode == "llm" || cli.llm_rerank > 0 || cli.llm_rerank_all;
   if (need_llm) {
     std::filesystem::create_directories(cli.cfg.cache_dir);
     client = DeepSeekClient::from_config(cli.cfg.config_path, cli.cfg.model, cli.cfg.cache_dir);

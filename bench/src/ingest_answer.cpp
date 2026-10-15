@@ -501,6 +501,7 @@ static void merge_think_evidence(Engine& engine, const std::string& question, in
 //   步骤5：收集证据 uid 与 dia_id（LoCoMo 证据命中统计用）返回。
 AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& cfg) {
   TimePoint qdate = parse_session_date(q.question_date, 0);
+  std::vector<std::string> entity_extra_uids;  // 低置信放行：通道候选并入标准池（去重后）
   // 步骤0：实体档案通道（检索角色修正）
   if (cfg.use_entity_profile) {
     AnswerResult ent = answer_entity_channel(engine, q, cfg);
@@ -508,30 +509,41 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
     // 不应遮蔽标准召回（LME 偏好题实测：通道错选助手实体返回弱证据弃答，
     // 而标准管道本可召回金标，recall 0.233→1.0 单题验证）。
     if (!ent.abstained && (!ent.evidence_uids.empty() || !ent.answer_text.empty())) {
-      // 时序/多跳题：实体通道结果上叠加 think 证据（与标准管道共用 merge_think_evidence，
-      // 旧事实（valid_to<=qdate）在 think 证据中同样剔除）
-      if (cfg.use_think && is_temporal_question(q.question))
-        merge_think_evidence(engine, q.question, cfg.think_rounds, ent, qdate);
-      // 证据终排（与标准管道同机制）：think 证据并入后按问题内容词 BM25-lite
-      // 精确命中重排，防能量/时近偏置盖过词面精确命中（stable，同分保持原序）。
-      if (ent.evidence_uids.size() > 1) {
-        std::vector<const Node*> nodes;
-        std::vector<size_t> ord(ent.evidence_uids.size());
-        for (size_t i = 0; i < ord.size(); ++i) {
-          ord[i] = i;
-          nodes.push_back(engine.storage().get_node(ent.evidence_uids[i]));
+      // 低置信放行（--entity-pass-threshold，默认 -1=关）：通道榜首内容分
+      // （槽位直查恒 1.0）低于阈值 → 不整通道返回，候选并入标准管道池子继续流程；
+      // 高置信 → 维持整通道返回（下方逐行现状）。
+      bool pass_through =
+          cfg.entity_pass_threshold >= 0.0 && ent.score < cfg.entity_pass_threshold;
+      if (!pass_through) {
+        // 时序/多跳题：实体通道结果上叠加 think 证据（与标准管道共用 merge_think_evidence，
+        // 旧事实（valid_to<=qdate）在 think 证据中同样剔除）
+        if (cfg.use_think && is_temporal_question(q.question))
+          merge_think_evidence(engine, q.question, cfg.think_rounds, ent, qdate);
+        // 证据终排（与标准管道同机制）：think 证据并入后按问题内容词 BM25-lite
+        // 精确命中重排，防能量/时近偏置盖过词面精确命中（stable，同分保持原序）。
+        if (ent.evidence_uids.size() > 1) {
+          std::vector<const Node*> nodes;
+          std::vector<size_t> ord(ent.evidence_uids.size());
+          for (size_t i = 0; i < ord.size(); ++i) {
+            ord[i] = i;
+            nodes.push_back(engine.storage().get_node(ent.evidence_uids[i]));
+          }
+          std::vector<double> cs = content_scores(q.question, nodes);
+          std::stable_sort(ord.begin(), ord.end(),
+                           [&](size_t a, size_t b) { return cs[a] > cs[b]; });
+          std::vector<std::string> reranked;
+          for (size_t i : ord) reranked.push_back(ent.evidence_uids[i]);
+          ent.evidence_uids = std::move(reranked);
         }
-        std::vector<double> cs = content_scores(q.question, nodes);
-        std::stable_sort(ord.begin(), ord.end(),
-                         [&](size_t a, size_t b) { return cs[a] > cs[b]; });
-        std::vector<std::string> reranked;
-        for (size_t i : ord) reranked.push_back(ent.evidence_uids[i]);
-        ent.evidence_uids = std::move(reranked);
+        if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client)
+          std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
+                       q.id.c_str());
+        return ent;
       }
-      if (cfg.llm_rerank > 0 && cfg.llm_client)
-        std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
-                     q.id.c_str());
-      return ent;
+      entity_extra_uids = ent.evidence_uids;  // 不丢：并入标准池（下方按 uid 去重）
+      std::fprintf(stderr, "  [entity-pass] %s: 通道低置信 %.3f < %.2f，%zu 条候选并入标准池\n",
+                   q.id.c_str(), ent.score, cfg.entity_pass_threshold,
+                   entity_extra_uids.size());
     }
   }
   AnswerResult ar;
@@ -565,6 +577,22 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
       continue;  // 有新弃旧；新值未召回则旧证据保留
     evs.push_back(&se);
   }
+  // 低置信放行合并：实体通道候选按 uid 去重并入池（来源标记 = 本段日志；
+  // ScoredEvent 分数置 0——终排只看内容词 BM25，融合分仅 final_mix 开启时使用，
+  // 该通道默认关闭）。通道候选已过其自身的知识更新过滤（语义与标准管道同）。
+  // 注意：先完整构建 entity_extra 再统一取指针——边 push 边取 &back() 会在
+  // realloc 时悬空（segfault 实测教训）。
+  std::vector<ScoredEvent> entity_extra;  // 值持有，指针稳定
+  for (auto& uid : entity_extra_uids) {
+    if (present.count(uid)) continue;  // 与 recall 池重叠 → 去重，不重复占位
+    const Node* n = engine.storage().get_node(uid);
+    if (!n) continue;
+    present.insert(uid);
+    ScoredEvent se{};
+    se.event = n;
+    entity_extra.push_back(std::move(se));
+  }
+  for (auto& se : entity_extra) evs.push_back(&se);
   // 注意：此处不再提前截断——融合排序（能量/语境/时近）只决定候选池成员资格，
   // top-k 选择推迟到内容词终排之后（见步骤4），避免词面精确命中的金标在池内
   // 排名 11~k_pool 时被提前裁掉（LME 偏好题实测失败模式）。
@@ -641,11 +669,13 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
     for (size_t i : ord) reranked.push_back(evs[i]);
     evs = std::move(reranked);
     top_content = cs[ord.front()];
-    // 句级语义 spike：LLM 重排（--llm-rerank N）——BM25 终排后、截 top-k 之前，
-    // 取前 N 条送一次 LLM 调用按句级相关度重选（其前 k 置顶，其余 BM25 原序补齐）。
-    // 失败/无有效编号 → 优雅降级 BM25 原序（日志标注）；默认 N=0 = 本段不执行。
-    if (cfg.llm_rerank > 0 && cfg.llm_client) {
-      size_t n = std::min<size_t>((size_t)cfg.llm_rerank, evs.size());
+    // 句级语义 spike：LLM 重排（--llm-rerank N / --llm-rerank-all）——BM25 终排后、
+    // 截 top-k 之前，取前 N 条（--llm-rerank-all 时全池）送一次 LLM 调用按句级
+    // 相关度重选（其前 k 置顶，其余 BM25 原序补齐）。失败/无有效编号 → 优雅降级
+    // BM25 原序（日志标注）；两者皆关 = 本段不执行。
+    if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) {
+      size_t n = cfg.llm_rerank_all ? evs.size()
+                                    : std::min<size_t>((size_t)cfg.llm_rerank, evs.size());
       std::vector<const Node*> cands;
       std::string cand_dias;  // 诊断：候选 dia_id 列表（金标是否进 top-N 的判定依据）
       for (size_t i = 0; i < n; ++i) {
@@ -676,7 +706,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
       }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
-  } else if (cfg.llm_rerank > 0 && cfg.llm_client) {
+  } else if ((cfg.llm_rerank > 0 || cfg.llm_rerank_all) && cfg.llm_client) {
     std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
   }
 

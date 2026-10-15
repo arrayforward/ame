@@ -93,6 +93,13 @@ struct BenchConfig {
   // 提前返回，不经过此处。
   int llm_rerank = 0;                       // 重排候选名额（BM25 终排序 top-N）
   ILlmClient* llm_client = nullptr;         // main 注入；空指针 = 通道关闭
+  bool llm_rerank_all = false;              // --llm-rerank-all：重排窗口扩为全池（k_pool）
+  // ---- 实体档案通道低置信放行（--entity-pass-threshold，默认 -1=关=现状）----
+  // 通道裁决（answer_entity_channel 非弃权整通道返回）时置信 = 通道榜首内容分
+  // （槽位直查恒 1.0）。置信 < 阈值 → 不整通道返回，其候选去重并入标准管道候选池
+  // （与 recall 池重叠按 uid 去重，不丢、随池一起 BM25 终排），继续标准流程；
+  // 置信 ≥ 阈值 → 维持整通道返回（逐行现状）。
+  double entity_pass_threshold = -1.0;      // <0 = 关闭；建议实验值 0.5
 
   // ---- LLM 管线配置（任务二）----
   std::string extractor_mode = "rule";    // rule|llm（llm 按会话批量提取）
