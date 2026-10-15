@@ -682,6 +682,72 @@ static void test_cheap_rerank() {
   }
 }
 
+// svec 档（--rerank svec）：cheap 特征 + 外挂 scorer 提供的 svec_cos。
+// 正路：stub scorer 返回递增 cos → minmax 后末位候选置顶；scorer 缺失/输出非法/
+// 模型缺失 → 优雅降级（不 crash；降级后玩具模型全同分 → stable 保持 BM25 原序）。
+static void test_svec_rerank() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");  // 金标：词面弱（池序 2）
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");  // decoy：词面高频（BM25 首）
+  // 玩具 12 特征模型：唯 svec_cos 权重 1（得分 = 题内 minmax(cos)）。
+  const char* mpath = "/tmp/ame_test_svec_model.json";
+  {
+    std::ofstream f(mpath);
+    f << "{\"features\":[\"svec_cos\"],\"weights\":[1.0],\"bias\":0.0}";
+  }
+  // stub scorer：读 --pool JSON，按池下标返回递增 cos（末位 = 1.0 最大）。
+  const char* stub = "/tmp/ame_test_svec_stub.py";
+  {
+    std::ofstream f(stub);
+    f << "import json,sys\n"
+         "a=sys.argv[sys.argv.index('--pool')+1]\n"
+         "d=json.load(open(a,encoding='utf-8'))\n"
+         "print(json.dumps({'cos':[float(i) for i,_ in enumerate(d['texts'])]}))\n";
+  }
+  // 垃圾 scorer：输出非 JSON（解析失败路径）。
+  const char* garbage = "/tmp/ame_test_svec_garbage.py";
+  { std::ofstream f(garbage); f << "print('garbage-not-json')\n"; }
+
+  BenchQuestion q;
+  q.id = "q-svec-1";
+  q.question = "What book was recommended to Melanie?";
+  auto mk = [&](const char* scorer) {
+    BenchConfig cfg;
+    cfg.use_entity_profile = false;
+    cfg.use_think = false;
+    cfg.rerank_mode = "svec";
+    cfg.svec_rerank_path = mpath;
+    cfg.svec_scorer = scorer;
+    return cfg;
+  };
+  auto front_dia = [&](const auto& r) {
+    const Node* n = e.storage().get_node(r.evidence_uids.front());
+    return n && n->attrs.count("dia_id") ? n->attrs.at("dia_id") : "-";
+  };
+  // python 可用性（stub 正路前置；降级路径不依赖 python）。
+  bool has_py = false;
+  if (FILE* fp = popen("python -c pass", "r")) has_py = pclose(fp) == 0;
+  if (has_py) {
+    auto r = answer(e, q, mk(stub));  // 正路：cos 末位最大 → 金标置顶
+    CHECK(front_dia(r) == "D1:1");
+  } else {
+    std::fprintf(stderr, "  [test] python 不可用，svec stub 正路用例跳过（降级用例照跑）\n");
+  }
+  auto rd = answer(e, q, mk("/tmp/ame_test_no_such_scorer.py"));  // scorer 缺失 → 降级
+  CHECK(front_dia(rd) == "D2:1");
+  if (has_py) {
+    auto rg = answer(e, q, mk(garbage));  // scorer 输出非法 → 降级
+    CHECK(front_dia(rg) == "D2:1");
+  }
+  auto bm = mk(stub);  // 模型缺失 → 降级 BM25 原序
+  bm.svec_rerank_path = "/tmp/ame_test_no_such_svec_model.json";
+  CHECK(front_dia(answer(e, q, bm)) == "D2:1");
+}
+
 // 模式门控：bm25 档（默认）即使有 LLM 客户端/全池标志也不触发重排（Fake 零调用）；
 // cheap 档未配模型路径 → 日志降级、行为 = BM25 原序。
 static void test_rerank_mode_gating() {
@@ -738,6 +804,7 @@ int main() {
   test_entity_pass_through();
   test_rerank_guard();
   test_cheap_rerank();
+  test_svec_rerank();
   test_rerank_mode_gating();
   test_parse_session_date();
   test_store_adapters();

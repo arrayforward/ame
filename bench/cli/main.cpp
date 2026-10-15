@@ -65,7 +65,9 @@ struct Cli {
   double entity_pass = -1.0;   // --entity-pass-threshold X：实体通道低置信放行（<0=关=现状）
   double rerank_guard = -1.0;  // --rerank-guard X：BM25 强命中豁免 LLM 重排（<0=关=现状）
   std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
-  std::string rerank_mode;     // --rerank bm25|cheap|llm（空=未显式指定，由别名/默认推定）
+  std::string svec_rerank;     // --svec-rerank PATH：svec 档 12 特征模型 JSON（空=关）
+  std::string svec_scorer;     // --svec-scorer PATH：外挂打分器脚本（默认 bench/scripts/svec_scorer.py）
+  std::string rerank_mode;     // --rerank bm25|cheap|svec|llm（空=未显式指定，由别名/默认推定）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -124,6 +126,8 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--entity-pass-threshold") cli.entity_pass = std::atof(next().c_str());
     else if (a == "--rerank-guard") cli.rerank_guard = std::atof(next().c_str());
     else if (a == "--cheap-rerank") cli.cheap_rerank = next();
+    else if (a == "--svec-rerank") cli.svec_rerank = next();
+    else if (a == "--svec-scorer") cli.svec_scorer = next();
     else if (a == "--rerank") cli.rerank_mode = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
@@ -172,8 +176,10 @@ void usage() {
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
                "      [--name-alias FILE]（graph：人名/专名严等价别名表 names_zh.json，\n"
                "       摄入前灌入 M3 别名+M1 词面+M2 实体，默认关）\n"
-               "      [--rerank bm25|cheap|llm]（graph：终排模式；默认 bm25=纯词面。\n"
-               "       cheap=特征重排器零LLM需 --cheap-rerank PATH；llm=全池LLM打分）\n"
+               "      [--rerank bm25|cheap|svec|llm]（graph：终排模式；默认 bm25=纯词面。\n"
+               "       cheap=特征重排器零LLM需 --cheap-rerank PATH；svec=cheap特征+句向量cos\n"
+               "       需 --svec-rerank PATH(12特征模型)+外挂scorer --svec-scorer PATH；\n"
+               "       llm=全池LLM打分）\n"
                "      [兼容别名·deprecated] --llm-rerank N / --llm-rerank-all / --cheap-rerank\n"
                "       PATH（映射到 --rerank；与 --rerank 不同档并用报互斥错）\n"
                "      [--llm-prompt-pin]（llm 档 prompt 变体：词面精确命中必须保留靠前）\n"
@@ -183,6 +189,8 @@ void usage() {
                "       保底 top-k 首槽；默认 -1=关；建议实验值 0.8）\n"
                "      [--cheap-rerank PATH]（graph：特征逻辑重排器替代 LLM 打分，零 LLM；\n"
                "       模型由 cheap_rerank_train.py 训练；默认空=关）\n"
+               "      [--svec-rerank PATH --svec-scorer PATH]（graph：svec 档 12 特征模型 +\n"
+               "       外挂 python 打分器；scorer 失败自动降级 cheap 原分，默认空=关）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -196,6 +204,8 @@ int main(int argc, char** argv) {
   cli.cfg.entity_pass_threshold = cli.entity_pass;  // --entity-pass-threshold（默认 -1=现状）
   cli.cfg.rerank_guard = cli.rerank_guard;          // --rerank-guard（默认 -1=关）
   cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
+  cli.cfg.svec_rerank_path = cli.svec_rerank;       // --svec-rerank（默认空=关）
+  if (!cli.svec_scorer.empty()) cli.cfg.svec_scorer = cli.svec_scorer;  // --svec-scorer
 
   // ---- 终排模式消解（--rerank bm25|cheap|llm 一等公民；旧开关为兼容别名）----
   // 互斥：显式 --rerank 与别名开关（--llm-rerank N>0 / --llm-rerank-all / --cheap-rerank）
@@ -211,17 +221,22 @@ int main(int argc, char** argv) {
     if (cli.llm_rerank > 0) add("llm", "--llm-rerank");
     if (cli.llm_rerank_all) add("llm", "--llm-rerank-all");
     if (!cli.cheap_rerank.empty()) add("cheap", "--cheap-rerank");
+    if (!cli.svec_rerank.empty()) add("svec", "--svec-rerank");
     if (modes.size() > 1) {
       std::fprintf(stderr, "终排模式互斥冲突: %s（请只保留一个模式开关）\n", req.c_str());
       return 1;
     }
     std::string mode = modes.empty() ? "bm25" : *modes.begin();
-    if (mode != "bm25" && mode != "cheap" && mode != "llm") {
-      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|llm）\n", mode.c_str());
+    if (mode != "bm25" && mode != "cheap" && mode != "svec" && mode != "llm") {
+      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|svec|llm）\n", mode.c_str());
       return 1;
     }
     if (mode == "llm" && !cli.llm_rerank_all && cli.llm_rerank <= 0)
       cli.llm_rerank_all = true;  // --rerank llm 未指定窗口 → 默认全池（机制2正形）
+    if (mode == "svec" && cli.svec_rerank.empty()) {
+      std::fprintf(stderr, "--rerank svec 需 --svec-rerank PATH（12 特征模型 JSON）\n");
+      return 1;
+    }
     cli.cfg.rerank_mode = mode;
   }
 

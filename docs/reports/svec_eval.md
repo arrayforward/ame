@@ -121,7 +121,106 @@ hf-mirror.com 全量成功（hf 直连未试，按任务书镜像优先）：
 
 ```bash
 python bench/scripts/svec_eval.py \
-  --pools ../ame/bench/runs/mechanisms/pools50.ndjson \
-  --log   ../ame/bench/runs/mechanisms/m12_cal.log \
-  --baseline-model ../ame/bench/runs/mechanisms/cheap_model_v2.json
+  --pools bench/runs/mechanisms/pools50.ndjson \
+  --log   bench/runs/mechanisms/m12_cal.log \
+  --baseline-model bench/runs/mechanisms/cheap_model_v2.json
 ```
+
+---
+
+## 9. 引擎路径复跑（N2：出灰区判决）
+
+**形态**：`--rerank svec` 第四档落地——cheap 特征打分 + `svec_cos`（外挂 Python
+打分器子进程每题一次 spawn 提供，popen 先例同 llm curl 传输；引擎核心零依赖
+零改动）。模型用 §3 训练好的 12 特征 `cheap_model_svec.json` 原样（svec_cos
+权重 +2.07；引擎特征合成与 svec_eval 修复后的题内 minmax 口径逐行对齐，且
+全量训练确定性——ame 重跑 svec_eval 与 svecl-line 数字逐位一致）。
+
+### 9.1 四档全对照（冻结配置：entity-pass 0.5 + guard 0.2，sample50，graph，
+extractor rule / answer baseline / k=10；覆盖率口径 = |金标∩top10|/|金标| 宏平均，n=48）
+
+| 档 | 覆盖率 | any-hit | judge | 备注 |
+|---|---|---|---|---|
+| bm25 | 0.464 | 25/48 | – | 纯词面基准 |
+| cheap | 0.557 | 29/48 | – | cheap_model_v2 |
+| **svec r1（冷缓存）** | **0.568** | 30/48 | – | scorer 0 降级 |
+| **svec r2（热缓存）** | **0.578** | 31/48 | – | 与 r1 仅 q2 翻转（0→0.5，uid 噪声） |
+| svec（judge 臂） | 0.573 | 31/48 | **0.160** | 覆盖率复证 0.573，带窄（±0.01） |
+| llm | 0.672 | 37/48 | 0.420 | 冻结带 0.646~0.672 复现 ✓ |
+
+- 对照臂与历史带：bm25 0.443~0.448 → 本配置 0.464（entity-pass+guard 增益）；
+  cheap 0.536~0.573 带 → 同配置 0.557；llm 带复现——对照系全健康。
+- **判决（预注册）**：svec 两次复跑 **0.568 / 0.578**——r1 < 0.57、r2 ∈ 灰区
+  → **灰区维持，未出灰区**：svec 不成立为"推荐默认关-LLM 形态"，默认档维持
+  cheap；svec 档保留为可选上位兜底（零 LLM、覆盖率与 any-hit 均高于 cheap
+  同配置，且净救回 B 类 q10——金标 D3:13 经实体通道入池后被 svec_cos 从
+  第 20 位前提进 top-10，0→1.0；同配置 cheap 救不回）。
+- **离线复刻 +0.114 vs 引擎 +0.02 的落差归因**（蓝方 #1）：sim 救回集 7 题中
+  5 题已被 cheap+entity-pass+guard 组合用别的机制救走（救回集高度重叠）；
+  guard 0.2 锁首槽进一步压缩重排空间；引擎净效果 = 救回 q10/q2、丢 q11
+  （1.0→0.5），合计 +0.011~+0.021。**§5 的加性投影（0.65~0.69）证伪**——
+  实体通道并入候选上的 svec 增益远小于标准池，且新权重对旧题有挤出。
+
+### 9.2 耗时账（外挂 scorer 形态，PC 实测）
+
+| 项 | 冷（缓存清空 r1） | 热（r2） |
+|---|---|---|
+| 首题（模型加载+全池 embed） | 2747 ms | 567 ms |
+| 每题中位 / p90 | 899 / 1647 ms | 716 / 849 ms |
+| 50 题合计 | 51.9 s | 36.2 s |
+
+- 主成本 = 每题一次 python 进程 spawn + numpy/onnxruntime 重新 import
+  （~0.5 s/次），非 ONNX 推理本身（单题 embed 仅 ~21 ms，§4）。
+- **这是 bench 外挂验证形态的账，不是端侧集形态**：端侧形态应为写时 embed
+  + 常驻向量/原生推理，每查询增量 ≈ 1 次问题 embed（~21 ms PC）+ 点积。
+- 降级臂实测：`--svec-scorer` 指向不存在路径 → 50/50 题全部优雅降级
+  cheap 原分（覆盖率 0.521，12 特征模型无 svec 项兜底水平），无 crash/hang。
+
+### 9.3 judge
+
+svec 档 judge **0.160** vs llm 档 0.420（同冻结配置；n=1 含 uid 噪声）。
+判读：svec 的 top-10 组成由词面+图特征权重主导，拼接出的答案文本质量明显
+低于 LLM 选中集（LLM 选中偏"人类可读叙事序"）——覆盖率接近时 judge 差距
+大是预期现象，非异常；但也说明 svec 档的上限仍是"检索兜底"而非"答题质量"。
+
+### 9.4 蓝方自检（引擎节追加）
+
+1. **加性假设证伪的完整性**：落差三因素（救回集重叠/guard 压缩/权重挤出）
+   均有逐题证据（q10/q2 救回、q11 丢失、§9.1 对照带），非归因含糊。
+2. **权重口径一致性**：引擎模型 JSON 与特征合成均用 svec_eval 修复后
+   （题内 minmax）口径；权重确定性复现（跨 worktree 逐位一致）。
+3. **scorer 崩溃降级**：单测三路径（进程缺失/输出非法/模型缺失）+ 实跑
+   50/50 降级，双实测覆盖；降级语义 = svec_cos 全同值 → minmax 恒 0 →
+   特征项归零（不降级 BM25 原序，保持 cheap 同级兜底）。
+4. **临时文件**：mkstemp 系统 temp 唯一名；bench 答题单线程逐题 spawn，
+   无并发竞争；残留由系统 temp 策略兜底。
+5. **缓存键**：sha1(模型文件名|kind|文本)，换模型自动失效；embed 缓存与
+   模型权重均在 gitignore（bench/models/、bench/runs/），未入库已核验。
+6. **ONNX 失败 fallback**：onnxruntime 异常 → scorer 非零退出 → bench 解析
+   失败 → 同降级链（与 #3 等价路径，不另设分支）。
+7. **噪声带**：svec 三次覆盖率 0.568/0.578/0.573（±0.01，窄）；stdout 表
+   recall@k 口径摆动更大（0.625~0.646），判决一律用覆盖率口径 r1/r2。
+8. **judge 噪声**：svec judge 0.160 为单次运行，只作方向性判读（§9.3）。
+9. **预存失败披露**：`test_storage` 在本任务前已 segfault（二进制 18:38 早于
+   本任务 20:40 后的全部改动；include 图与 bench 改动零交集；gdb 下
+   heisen-通过 19/19；ASAN 不可用 winlibs 未带 libasan）。ctest 在全量/排除
+   模式下均间歇挂起（两次止于不同测试、无子进程残留；单跑同测试全过），
+   判定为本机 ctest-on-Windows 管道问题 + test_storage 预存 UB 的叠加，
+   非本任务引入。按"引擎核心零改动"纪律未修 storage。验收证据改为逐测试
+   单跑：除 test_storage 外 **19/19 全部通过**（test_bench 150/150，含新
+   单测 test_svec_rerank 的 stub 正路 + 三降级路径）。
+
+### 9.5 改动清单（引擎节）
+
+- `bench/include/ame/bench/bench.h`：`svec_rerank_path` / `svec_scorer` 配置。
+- `bench/cli/main.cpp`：`--rerank svec|...` 一等公民 + `--svec-rerank` /
+  `--svec-scorer` 参数 + 互斥消解 + usage。
+- `bench/src/ingest_answer.cpp`：`run_svec_scorer`（mkstemp 临时文件 +
+  popen + 末行 JSON 容错解析）+ `cheap_score_pool` 增 `svec_cos` 可选
+  特征（题内 minmax）+ svec 档分支（scorer 失败降级 cheap 原分）+
+  guard/entity-pass 横切照常（apply_selection 共用）。
+- `bench/scripts/svec_scorer.py`（新）：外挂打分器，复用 svec_eval 推理与
+  缓存，stdout JSON 协议 + stderr 诊断。
+- `tests/test_bench.cpp`：`test_svec_rerank`（stub 正路 + 三降级路径）。
+- 运行产物（不入库）：`bench/runs/svec_eng/`（四臂 ndjson/out/log +
+  降级臂）；`bench/models/`（int8 onnx + 词表，gitignore）。

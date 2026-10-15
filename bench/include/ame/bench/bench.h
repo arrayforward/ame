@@ -100,9 +100,11 @@ struct BenchConfig {
   // 正确 top-1 被 LLM 挤走的回退修复）。11 救题的金标位于 BM25 11~27 位、
   // 不受首槽锁定影响（LLM 选中序 1/2/1/1 → 锁定后最多后移一位仍在 top-k）。
   double rerank_guard = -1.0;               // <0 = 关闭；建议实验值 0.8（本 benchmark 实测需按 §13 校准）
-  // ---- 双模式终排开关（--rerank bm25|cheap|llm，默认 bm25=现状）----
+  // ---- 双模式终排开关（--rerank bm25|cheap|svec|llm，默认 bm25=现状）----
   // bm25 = 纯词面终排（零 LLM 零模型）；cheap = 特征逻辑重排器（零 LLM 有模型，
-  // 无网兜底，需 cheap_rerank_path）；llm = 全池/窗口 LLM 语义打分（需 llm_client）。
+  // 无网兜底，需 cheap_rerank_path）；svec = cheap 特征 + 句向量 cos（需 svec_rerank_path
+  // 12 特征模型 + 外挂 scorer 子进程，scorer 失败降级 cheap 原分）；
+  // llm = 全池/窗口 LLM 语义打分（需 llm_client）。
   // 旧开关（--llm-rerank/--llm-rerank-all/--cheap-rerank）为兼容别名，CLI 映射进
   // 本字段；guard/entity-pass 为横切配套，各档通用。llm_rerank/llm_rerank_all
   // 在 llm 档内作窗口参数（-all = 全池）。
@@ -111,6 +113,14 @@ struct BenchConfig {
   // 用训练好的逻辑回归模型（cheap_rerank_train.py 产出 JSON）对全池按引擎现成
   // 特征打分替代 LLM 全池打分（推理零 LLM 零网络）；与 LLM 重排并存时 LLM 优先。
   std::string cheap_rerank_path;            // 模型 JSON 路径；空 = 关闭
+  // ---- 句向量档（--rerank svec，需 --svec-rerank PATH 的 12 特征模型）----
+  // = cheap 特征打分 + svec_cos 特征（问题向量·证据向量余弦，题内 minmax；
+  // 复刻 svec_eval.py 验证过的口径与权重）。cos 由外挂打分器子进程提供
+  // （python bench/scripts/svec_scorer.py，popen 先例同 llm curl 传输；
+  // 引擎核心零依赖）。scorer 缺失/崩溃/输出非法 → 该题降级 cheap 原分
+  // （svec_cos 置 0 → 特征贡献归零，由其余 11 特征排序，不降级 BM25 原序）。
+  std::string svec_rerank_path;             // 12 特征模型 JSON；空 = svec 档未配模型
+  std::string svec_scorer = "bench/scripts/svec_scorer.py";  // 外挂打分器脚本
   // ---- 实体档案通道低置信放行（--entity-pass-threshold，默认 -1=关=现状）----
   // 通道裁决（answer_entity_channel 非弃权整通道返回）时置信 = 通道榜首内容分
   // （槽位直查恒 1.0）。置信 < 阈值 → 不整通道返回，其候选去重并入标准管道候选池

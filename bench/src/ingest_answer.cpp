@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <unistd.h>  // mkstemp/close（popen 子进程传输先例同 llm/src/client.cpp）
 
 namespace ame {
 
@@ -194,11 +196,67 @@ static const CheapModel& load_cheap_model(const std::string& path) {
   return cache.emplace(path, std::move(m)).first->second;
 }
 
-// cheap_score_pool：对 BM25 终排后的全池逐候选算特征并打分，返回 0 基下标
-// 降序（模型序）。特征归一全部题内 minmax（与训练脚本同口径）；is_entity 由
-// 调用方传入的通道候选 uid 集合给出（训练数据该特征恒 0，模型权重≈0 安全外推）；
-// ent_overlap = 问题专名 token（大写非句首，len≥2）出现在证据词集合中的比例
-// （词面特征：实体重合，无泄漏——标签来自 LLM，特征不含任何 LLM 产物）。
+// ---- svec 档外挂打分器（--rerank svec）----
+// 每题候选池 spawn 一次 `python <scorer> --pool <tmp.json>`（popen 先例同 llm 的
+// curl 子进程传输；引擎核心零依赖）。输入 {"question":..., "texts":[...]}，
+// 期望 stdout 末行 JSON {"cos":[...]}（每候选一个余弦，长度 == texts）。
+// 任一环节失败（spawn/解析/长度不符/非有限值）→ 返回空 vector，调用方降级
+// cheap 原分（svec_cos 置 0，特征贡献归零）。临时文件用系统 temp + 进程内计数器
+// 唯一名（bench 单线程，无并发竞争；崩溃残留由系统 temp 清理策略兜底）。
+static std::vector<double> run_svec_scorer(const std::string& scorer_path,
+                                           const std::string& question,
+                                           const std::vector<const ScoredEvent*>& evs,
+                                           double* elapsed_ms) {
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<double> out;
+  char tmp_path[] = "/tmp/ame_svec_pool_XXXXXX";
+  int fd = mkstemp(tmp_path);
+  if (fd < 0) return out;
+  {
+    std::ofstream f(tmp_path);
+    Json j = Json::object();
+    j["question"] = Json::string(question);
+    Json arr = Json::array();
+    for (auto* se : evs) arr.push(Json::string(se->event->text));
+    j["texts"] = arr;
+    f << j.dump();
+  }
+  close(fd);
+  std::string cmd = "python \"" + scorer_path + "\" --pool \"" + std::string(tmp_path) + "\"";
+  std::string raw;
+  FILE* fp = popen(cmd.c_str(), "r");
+  int rc = -1;
+  if (fp) {
+    char buf[4096];
+    while (size_t n = fread(buf, 1, sizeof(buf), fp)) raw.append(buf, n);
+    rc = pclose(fp);
+  }
+  std::remove(tmp_path);
+  *elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                    .count();
+  if (rc != 0 || raw.empty()) return out;
+  // stdout 容忍前后噪声行：取最后一行非空行解析。
+  size_t end = raw.find_last_not_of(" \t\r\n");
+  if (end == std::string::npos) return out;
+  size_t begin = raw.rfind('\n', end);
+  begin = (begin == std::string::npos) ? 0 : begin + 1;
+  std::string last = raw.substr(begin, end - begin + 1);
+  bool ok = false;
+  Json j = Json::parse(last, &ok);
+  if (!ok || j.kind != Json::Obj) return out;
+  const Json* cos = j.find("cos");
+  if (!cos || cos->kind != Json::Arr || cos->arr.size() != evs.size()) return out;
+  out.reserve(evs.size());
+  for (auto& v : cos->arr) {
+    double x = v.as_num();
+    if (!std::isfinite(x)) return {};
+    out.push_back(x);
+  }
+  return out;
+}
+
+// question_entity_tokens：问题专名 token（大写非句首，len≥2，小写化）——
+// 与 cheap_rerank_train.py / svec_eval.py 同口径。
 static std::vector<std::string> question_entity_tokens(const std::string& question) {
   std::vector<std::string> out;
   std::string cur;
@@ -224,10 +282,18 @@ static std::vector<std::string> question_entity_tokens(const std::string& questi
   return out;
 }
 
+// cheap_score_pool：对 BM25 终排后的全池逐候选算特征并打分，返回 0 基下标
+// 降序（模型序）。特征归一全部题内 minmax（与训练脚本同口径）；is_entity 由
+// 调用方传入的通道候选 uid 集合给出（训练数据该特征恒 0，模型权重≈0 安全外推）；
+// ent_overlap = 问题专名 token（大写非句首，len≥2）出现在证据词集合中的比例
+// （词面特征：实体重合，无泄漏——标签来自 LLM，特征不含任何 LLM 产物）。
+// svec_cos（可空）：外挂打分器给出的原始余弦，题内 minmax 后入特征表——与
+// svec_eval.py 修复后的口径一致；空指针/全同值 → 特征恒 0（权重项自然归零）。
 static std::vector<size_t> cheap_score_pool(const CheapModel& m, const std::string& question,
                                             const std::vector<const ScoredEvent*>& evs,
                                             const std::vector<double>& cs,
-                                            const std::unordered_set<std::string>& entity_uids) {
+                                            const std::unordered_set<std::string>& entity_uids,
+                                            const std::vector<double>* svec_cos = nullptr) {
   size_t n = evs.size();
   auto minmax = [&](double v, double lo, double hi) { return hi > lo ? (v - lo) / (hi - lo) : 0.0; };
   std::vector<double> fus(n), gra(n), ctx(n), tim(n), rec(n);
@@ -298,6 +364,11 @@ static std::vector<size_t> cheap_score_pool(const CheapModel& m, const std::stri
         {"bm25_share", cs[i] / bm_max},
         {"ent_overlap", ent_ov},
     };
+    if (svec_cos != nullptr) {
+      double lo = *std::min_element(svec_cos->begin(), svec_cos->end());
+      double hi = *std::max_element(svec_cos->begin(), svec_cos->end());
+      x["svec_cos"] = minmax((*svec_cos)[i], lo, hi);
+    }
     double z = m.bias;
     for (size_t k = 0; k < m.features.size(); ++k) z += m.weights[k] * x[m.features[k]];
     double s = 1.0 / (1.0 + std::exp(-std::max(-30.0, std::min(30.0, z))));
@@ -698,7 +769,8 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           for (size_t i : ord) reranked.push_back(ent.evidence_uids[i]);
           ent.evidence_uids = std::move(reranked);
         }
-        if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap")
+        if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap" ||
+            cfg.rerank_mode == "svec")
           std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
                        q.id.c_str());
         return ent;
@@ -926,9 +998,45 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
                        q.id.c_str(), kk, evs.size(), top_content, sel_dias.c_str());
         }
       }
+    } else if (cfg.rerank_mode == "svec") {
+      // 句向量档：cheap 特征 + svec_cos（外挂 python 打分器，每题一次 spawn）。
+      // 模型缺失 → 降级 BM25 原序；scorer 失败 → 该题降级 cheap 原分
+      //（svec_cos 全同值 → 题内 minmax 恒 0 → 该特征权重项自然归零，排序由
+      // 其余 11 特征承担——与 cheap 档同级的可用性兜底，不降级 BM25 原序）。
+      if (cfg.svec_rerank_path.empty()) {
+        std::fprintf(stderr, "  [svec-rerank] %s: svec 档未配模型路径，降级 BM25 原序\n",
+                     q.id.c_str());
+      } else {
+        const CheapModel& m = load_cheap_model(cfg.svec_rerank_path);
+        if (!m.ok) {
+          std::fprintf(stderr, "  [svec-rerank] %s: 模型加载失败，降级 BM25 原序\n",
+                       q.id.c_str());
+        } else {
+          double scorer_ms = 0.0;
+          std::vector<double> cos = run_svec_scorer(cfg.svec_scorer, q.question, evs, &scorer_ms);
+          const bool scorer_ok = cos.size() == evs.size();
+          if (!scorer_ok) {
+            std::fprintf(stderr,
+                         "  [svec-rerank] %s: scorer 不可用（%.0fms），降级 cheap 原分（svec_cos 置 0）\n",
+                         q.id.c_str(), scorer_ms);
+            cos.assign(evs.size(), 0.0);
+          }
+          std::unordered_set<std::string> e_uids(entity_extra_uids.begin(),
+                                                 entity_extra_uids.end());
+          auto order_c = cheap_score_pool(m, q.question, evs, cs, e_uids, &cos);
+          size_t kk = std::min<size_t>((size_t)cfg.k, order_c.size());
+          std::string sel_dias =
+              apply_selection(std::vector<size_t>(order_c.begin(), order_c.begin() + kk));
+          std::fprintf(stderr,
+                       "  [svec-rerank] %s: 置顶 %zu/%zu 条 | scorer %.0fms%s | 榜首内容分 %.3f | 选中: %s\n",
+                       q.id.c_str(), kk, evs.size(), scorer_ms,
+                       scorer_ok ? "" : "(降级)", top_content, sel_dias.c_str());
+        }
+      }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
-  } else if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap") {
+  } else if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap" ||
+             cfg.rerank_mode == "svec") {
     std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
   }
 
