@@ -74,7 +74,11 @@ RememberResult Engine::remember(const std::string& text) {
 //        连同地点提示一并传入；记录 surface→uid 映射，并把新 uid 追加进共现列表
 // 步骤3：调用 M4 图写入器落库（M3 关键词归一在 writer 内部完成）
 // 步骤4：把 WriteResult 转换为 RememberResult 返回（错误码、事件 id、实体映射）
-RememberResult Engine::remember_event(const Extraction& ex) {
+RememberResult Engine::remember_event(const Extraction& ex_in) {
+  // 值副本：人名/专名归一域（--name-alias）需为命中别名表的称呼/昵称 surface 增补
+  // canonical 关键词——否则称呼轮（"老X/小X"提取出的实体）只有 INVOLVES 实体锚点、
+  // 不经实体种子不可达；alias_of 未命中时 ex 与 ex_in 内容一致，行为不变。
+  Extraction ex = ex_in;
   // M1 → M2：实体解析（带上下文证据：同事项其他实体候选）
   std::vector<std::pair<std::string, std::string>> resolved;
   std::vector<std::string> co_uids;
@@ -84,6 +88,15 @@ RememberResult Engine::remember_event(const Extraction& ex) {
     if (p) place_uid_hint = p->uid;
   }
   for (auto& e : ex.entities) {
+    // 人名归一：实体 surface 命中别名表 → 事件补挂 canonical 关键词（与 M4 写入的
+    // M3 normalize 归并到同一词节点，CONTAINS 通道对称呼轮/非称呼轮一视同仁）
+    std::string canon = keyword_.alias_of(e.surface);
+    if (!canon.empty()) {
+      bool dup = false;
+      for (auto& k : ex.keywords)
+        if (k.word == canon) { dup = true; break; }
+      if (!dup) ex.keywords.push_back({canon, "concept"});
+    }
     ResolveContext ctx;
     ctx.co_entity_uids = co_uids;  // 先解析的实体作为后解析的共现证据
     ctx.place_uid = place_uid_hint;

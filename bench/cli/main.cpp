@@ -58,6 +58,8 @@ struct Cli {
   std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
   std::string word_sim_path;   // --word-edges FILE[,FILE2]：统一 graded 边表（第六轮，默认空=关）
+  std::string name_alias;      // --name-alias FILE：人名/专名严等价别名表（names_zh.json，
+                               // 摄入前加载；M3 别名+M1 词面+M2 实体三通道贯通，默认空=关）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
@@ -110,6 +112,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--fb-exp") cli.fb_exp = next();
     else if (a == "--extractor-dict") cli.extractor_dict = next();
     else if (a == "--word-edges") cli.word_sim_path = next();
+    else if (a == "--name-alias") cli.name_alias = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
@@ -155,6 +158,8 @@ void usage() {
                "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
                "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
+               "      [--name-alias FILE]（graph：人名/专名严等价别名表 names_zh.json，\n"
+               "       摄入前灌入 M3 别名+M1 词面+M2 实体，默认关）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -302,6 +307,7 @@ int main(int argc, char** argv) {
     mark("load-lexicon", !cli.load_lexicon.empty());
     mark("extractor-dict", !cli.extractor_dict.empty());
     mark("word-sim", !cli.word_sim_path.empty());
+    mark("name-alias", !cli.name_alias.empty());
     mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);
@@ -469,6 +475,17 @@ int main(int argc, char** argv) {
     Engine& e = *eng_up;
     if (cli.has_weights)
       e.reranker().set_weights({cli.w_alpha, cli.w_beta, cli.w_gamma});
+    // --name-alias：人名/专名严等价别名表，须在摄入前加载（写入侧 M3 normalize、
+    // M1 提取词面与 M2 实体别名均依赖它；load-graph 快照已含实体/别名时幂等跳过建档）。
+    if (!cli.name_alias.empty()) {
+      int applied = 0;
+      if (apply_name_aliases(e, cli.name_alias, &applied) == Err::Ok)
+        std::fprintf(stderr, "[name-alias] case %s 灌入 %d 条（%s）\n",
+                     c.conversation_id.c_str(), applied, cli.name_alias.c_str());
+      else
+        std::fprintf(stderr, "[warn] name-alias 加载失败（%s），按未加载继续\n",
+                     cli.name_alias.c_str());
+    }
     // 引导式扩散阶段 1：beam 配置 + 反馈目录存在时先训监督门控
     if (cli.cfg.beam_width > 0) {
       e.set_diffusion_options(cli.cfg.beam_width, true);

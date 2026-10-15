@@ -47,9 +47,28 @@ static void test_link_related() {
   CHECK(s.find_edge(a->uid, b->uid, RelType::REL_CAUSE) != nullptr);
 }
 
+static void test_alias_of_and_guard() {
+  Storage s;
+  KeywordManager kw(s);
+  // alias_of：只认表内键（区别于 normalize 的 ASCII 小写化）
+  kw.add_alias("小李", "李建国");
+  CHECK(kw.alias_of("小李") == "李建国");
+  CHECK(kw.alias_of("李建国").empty());   // 标准词自身不是别名键
+  CHECK(kw.alias_of("Alice").empty());    // 小写化不产生映射
+  CHECK(kw.normalize("Alice") == "alice");  // normalize 语义不变
+  // 守卫原样：alias==standard 跳过
+  kw.add_alias("李建国", "李建国");
+  CHECK(kw.alias_of("李建国").empty());
+  // 守卫原样：内置标准词不可被改写（失眠是内置标准词）
+  kw.add_alias("失眠", "睡不着");
+  CHECK(kw.normalize("失眠") == "失眠");
+  CHECK(kw.alias_of("失眠").empty());
+}
+
 int main() {
   test_normalize_and_stopword();
   test_dormancy();
   test_link_related();
+  test_alias_of_and_guard();
   return AME_TEST_REPORT();
 }

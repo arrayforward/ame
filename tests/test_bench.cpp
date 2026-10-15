@@ -345,6 +345,60 @@ static void test_evidence_content_rerank() {
   CHECK(front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
 }
 
+// 人名/专名归一域（--name-alias）：姓名别名表三通道贯通验收——
+// M3 别名归一（守卫原样）、M1 词面注册（非称呼变体可提取）、M2 实体建档 +
+// 称呼轮（老X/小X）摄入归并到 canonical 实体（INVOLVES）与 canonical 关键词（CONTAINS）。
+static void test_apply_name_aliases() {
+  const char* path = "/tmp/ame_test_names_zh.json";
+  {
+    std::ofstream f(path);
+    f << "{\"source\":\"names_zh\",\"groups\":["
+      << "{\"canonical\":\"李建国\",\"aliases\":[\"小李\",\"李经理\",\"建国\"]}]}";
+  }
+  Engine e;
+  int applied = 0;
+  CHECK(apply_name_aliases(e, path, &applied) == Err::Ok);
+  CHECK(applied == 4);  // 组数 1 + 别名数 3
+  // M3：严等价归一 + 守卫原样（alias==standard 跳过）
+  CHECK(e.keywords().normalize("李经理") == "李建国");
+  CHECK(e.keywords().normalize("小李") == "李建国");
+  CHECK(e.keywords().normalize("李建国") == "李建国");
+  CHECK(e.keywords().alias_of("小李") == "李建国");
+  // M2：canonical 实体建档 + 全变体 Alias 节点
+  const Node* ent = e.storage().find_by_name(NodeKind::Entity, "李建国");
+  CHECK(ent != nullptr && ent->type == "person");
+  CHECK(e.storage().find_all_by_name(NodeKind::Alias, "小李").size() == 1);
+  // 摄入：非称呼变体（李经理）提取为关键词 → normalize 归并 → CONTAINS 挂 canonical
+  e.remember_turn("张伟", "李经理把预算砍掉了一半。", 1700000000, "D1:1", "s1");
+  const Node* kw_node = e.keywords().find("李建国");
+  CHECK(kw_node != nullptr);
+  bool contains_canon = false;
+  for (auto& [ed, nb] : e.storage().neighbors(kw_node->uid, {RelType::CONTAINS}))
+    if (nb->kind == NodeKind::Event && nb->attrs.count("dia_id") &&
+        nb->attrs.at("dia_id") == "D1:1")
+      contains_canon = true;
+  CHECK(contains_canon);
+  // 摄入：称呼轮（小李）→ M2 resolve 经 Alias 命中归并 canonical 实体（INVOLVES）
+  auto r = e.remember_turn("张伟", "小李说数字要砍三成。", 1700000060, "D1:2", "s1");
+  CHECK(r.code == Err::Ok);
+  bool involves_canon = false;
+  for (auto& [ed, nb] : e.storage().neighbors(ent->uid, {RelType::INVOLVES}))
+    if (nb->kind == NodeKind::Event && nb->attrs.count("dia_id") &&
+        nb->attrs.at("dia_id") == "D1:2")
+      involves_canon = true;
+  CHECK(involves_canon);
+  // 幂等：重复加载不重复建档
+  CHECK(apply_name_aliases(e, path, &applied) == Err::Ok);
+  CHECK(e.storage().find_all_by_name(NodeKind::Entity, "李建国").size() == 1);
+  // 坏文件：缺 groups → ParseError
+  const char* bad = "/tmp/ame_test_names_bad.json";
+  {
+    std::ofstream f(bad);
+    f << "{\"source\":\"names_zh\"}";
+  }
+  CHECK(apply_name_aliases(e, bad, nullptr) == Err::ParseError);
+}
+
 // 双后端存储抽象（--store graph|lmem，设计 §10.3）：同一 case 经 IStore 摄入取证，
 // 两后端证据均可回溯 dia_id（graph 自事件 attrs，lmem 自观测 meta.ref_obs），
 // GraphStore 结果与直接 answer() 逐题一致（适配器零行为差）。
@@ -390,6 +444,7 @@ int main() {
   test_snapshot_with_slots();
   test_chinese_lexicon();
   test_apply_lexicon_source_guard();
+  test_apply_name_aliases();
   test_evidence_content_rerank();
   test_parse_session_date();
   test_store_adapters();

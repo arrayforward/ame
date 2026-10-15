@@ -116,6 +116,10 @@ IngestStats ingest(Engine& engine, const BenchCase& c, IExtractor* extractor);
 // ---- 词典灌库：lexicon.json → M3 别名表 + RELATED 边（实现见 lexicon_apply.cpp）----
 Err apply_lexicon(Engine& engine, const std::string& path, int* applied = nullptr);
 
+// ---- 姓名别名表灌库：names_zh.json → M3 别名表 + M1 提取词面 + M2 实体/Alias
+// （人名/专名归一域，严格等价；须在摄入前调用，实现见 lexicon_apply.cpp）----
+Err apply_name_aliases(Engine& engine, const std::string& path, int* applied = nullptr);
+
 // ---- 问答器（离线基线）：recall 取证 → 组合答案 → 低置信弃答 ----
 struct AnswerResult {
   std::string answer_text;

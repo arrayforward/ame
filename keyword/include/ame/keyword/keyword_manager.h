@@ -39,6 +39,10 @@ class KeywordManager {
   // 别名表归一：睡不着/失眠症 → 失眠
   std::string normalize(const std::string& word) const;
   void add_alias(const std::string& alias, const std::string& standard);
+  // 别名表精确命中查询（与 normalize 区分：normalize 含 ASCII 小写化，本方法只在
+  // 别名表含 word 键时返回标准词，否则返回空串——人名/专名归一域用其判定"是否
+  // 别名表键"，避免把小写化误判为映射。专名归一域：姓名别名表 --name-alias）
+  std::string alias_of(const std::string& word) const;
   // 别名表持久化（并入 M12 组合快照，解决 load-graph 必须另带词典的问题）
   Json aliases_to_json() const;
   void aliases_from_json(const Json& j);

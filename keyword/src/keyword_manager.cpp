@@ -79,6 +79,14 @@ void KeywordManager::add_alias(const std::string& alias, const std::string& stan
   alias_[alias] = standard;
 }
 
+// 别名表精确命中查询：仅当 word 是别名表键时返回标准词，否则返回空串。
+// 与 normalize 的差异：normalize 对未命中词仍做 ASCII 小写化（"Alice"→"alice"），
+// 无法区分"小写化"与"映射"；alias_of 只认表内键，供人名/专名归一判定真实映射。
+std::string KeywordManager::alias_of(const std::string& word) const {
+  auto it = alias_.find(word);
+  return it != alias_.end() ? it->second : "";
+}
+
 // 别名表导出：{"aliases": {alias: standard, ...}} 对象段（含内置表，导入时覆盖写幂等）。
 Json KeywordManager::aliases_to_json() const {
   Json j = Json::object();

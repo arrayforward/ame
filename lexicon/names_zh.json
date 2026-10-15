@@ -1,0 +1,9 @@
+{
+  "source": "names_zh",
+  "comment": "人名/专名归一域（严格等价，非 graded 同义）：同一自然人的全变体（全名/姓名称呼/职位称呼/名字）归并到 canonical。守卫=KeywordManager::add_alias 内置保护原样生效（内置标准词不可改写、alias==standard 跳过）。组内是人工确认的同一性断言；同名同姓的两个不同人不得进同组（同一性由表维护者负责，引擎侧不再二次判定）。",
+  "groups": [
+    {"canonical": "李建国", "aliases": ["小李", "李经理", "建国"]},
+    {"canonical": "王秀英", "aliases": ["小王", "王姐", "秀英"]},
+    {"canonical": "陈志强", "aliases": ["老陈", "小陈", "志强"]}
+  ]
+}

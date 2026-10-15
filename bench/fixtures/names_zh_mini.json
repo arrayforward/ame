@@ -1,0 +1,119 @@
+[
+  {
+    "sample_id": "names-1",
+    "conversation": {
+      "session_1": [
+        {"speaker": "张伟", "dia_id": "D1:1", "text": "李建国说明天要开会讨论预算。"},
+        {"speaker": "王芳", "dia_id": "D1:2", "text": "好的，我把去年的数整理出来。"},
+        {"speaker": "张伟", "dia_id": "D1:3", "text": "他说这次特别着急。"},
+        {"speaker": "王芳", "dia_id": "D1:4", "text": "明白，我晚上发你。"},
+        {"speaker": "张伟", "dia_id": "D1:5", "text": "建国答应周三前给新数字。"},
+        {"speaker": "王芳", "dia_id": "D1:6", "text": "行，等他邮件。"},
+        {"speaker": "张伟", "dia_id": "D1:7", "text": "小李说数字要砍三成。"},
+        {"speaker": "王芳", "dia_id": "D1:8", "text": "这么狠？"},
+        {"speaker": "张伟", "dia_id": "D1:9", "text": "周三还开会吗？"},
+        {"speaker": "王芳", "dia_id": "D1:10", "text": "开，老时间。"},
+        {"speaker": "张伟", "dia_id": "D1:11", "text": "会议室我订好了。"},
+        {"speaker": "王芳", "dia_id": "D1:12", "text": "好。"}
+      ],
+      "session_1_date_time": "2023-02-10 15:00",
+      "session_2": [
+        {"speaker": "张伟", "dia_id": "D2:1", "text": "李经理当场拍板砍半。"},
+        {"speaker": "王芳", "dia_id": "D2:2", "text": "动作真快，谁劝的？"},
+        {"speaker": "张伟", "dia_id": "D2:3", "text": "小李劝的，他最有面子。"},
+        {"speaker": "王芳", "dia_id": "D2:4", "text": "那二季度轻松了。"},
+        {"speaker": "张伟", "dia_id": "D2:5", "text": "周五开会别忘了。"},
+        {"speaker": "王芳", "dia_id": "D2:6", "text": "嗯，带上纪要。"},
+        {"speaker": "张伟", "dia_id": "D2:7", "text": "下周还开会复盘吗？"},
+        {"speaker": "王芳", "dia_id": "D2:8", "text": "到时候看。"},
+        {"speaker": "张伟", "dia_id": "D2:9", "text": "周一例会照常。"},
+        {"speaker": "王芳", "dia_id": "D2:10", "text": "好的。"},
+        {"speaker": "张伟", "dia_id": "D2:11", "text": "散会早点回。"},
+        {"speaker": "王芳", "dia_id": "D2:12", "text": "知道了。"}
+      ],
+      "session_2_date_time": "2023-02-24 18:30"
+    },
+    "qa": [
+      {"question": "李经理开会时定了预算的事吗？", "answer": "答应周三前给新数字", "category": 1, "evidence": ["D1:5"]},
+      {"question": "建国在会上改了预算吗？", "answer": "砍半", "category": 1, "evidence": ["D2:1"]}
+    ]
+  },
+  {
+    "sample_id": "names-2",
+    "conversation": {
+      "session_1": [
+        {"speaker": "刘强", "dia_id": "D1:1", "text": "王秀英说她开始跑步了。"},
+        {"speaker": "陈静", "dia_id": "D1:2", "text": "真的？她以前最不爱动。"},
+        {"speaker": "刘强", "dia_id": "D1:3", "text": "她买了新跑鞋。"},
+        {"speaker": "陈静", "dia_id": "D1:4", "text": "哪天一起跑？"},
+        {"speaker": "刘强", "dia_id": "D1:5", "text": "小王报名了下月的赛事。"},
+        {"speaker": "陈静", "dia_id": "D1:6", "text": "她能坚持下来吗？"},
+        {"speaker": "刘强", "dia_id": "D1:7", "text": "她说要拉个群打卡。"},
+        {"speaker": "陈静", "dia_id": "D1:8", "text": "那我也加入。"},
+        {"speaker": "刘强", "dia_id": "D1:9", "text": "明早还跑步吗？"},
+        {"speaker": "陈静", "dia_id": "D1:10", "text": "跑，老路线。"},
+        {"speaker": "刘强", "dia_id": "D1:11", "text": "跑完记得拉伸。"},
+        {"speaker": "陈静", "dia_id": "D1:12", "text": "知道啦。"}
+      ],
+      "session_1_date_time": "2023-03-05 09:00",
+      "session_2": [
+        {"speaker": "刘强", "dia_id": "D2:1", "text": "王秀英昨天刷了十公里。"},
+        {"speaker": "陈静", "dia_id": "D2:2", "text": "进步这么快。"},
+        {"speaker": "刘强", "dia_id": "D2:3", "text": "她说下个月挑战半马。"},
+        {"speaker": "陈静", "dia_id": "D2:4", "text": "你可别掉队。"},
+        {"speaker": "刘强", "dia_id": "D2:5", "text": "小王天天早上拉我陪跑。"},
+        {"speaker": "陈静", "dia_id": "D2:6", "text": "我晚上加班去不了。"},
+        {"speaker": "刘强", "dia_id": "D2:7", "text": "周末陪我跑步啊。"},
+        {"speaker": "陈静", "dia_id": "D2:8", "text": "就这么定。"},
+        {"speaker": "刘强", "dia_id": "D2:9", "text": "下周跑休。"},
+        {"speaker": "陈静", "dia_id": "D2:10", "text": "好。"},
+        {"speaker": "刘强", "dia_id": "D2:11", "text": "比赛报名别忘。"},
+        {"speaker": "陈静", "dia_id": "D2:12", "text": "嗯。"}
+      ],
+      "session_2_date_time": "2023-03-19 20:00"
+    },
+    "qa": [
+      {"question": "王姐跑步是为了哪场比赛？", "answer": "报名了下月的赛事", "category": 1, "evidence": ["D1:5"]},
+      {"question": "秀英最近跑得如何？", "answer": "刷了十公里", "category": 1, "evidence": ["D2:1"]}
+    ]
+  },
+  {
+    "sample_id": "names-3",
+    "conversation": {
+      "session_1": [
+        {"speaker": "杨柳", "dia_id": "D1:1", "text": "陈志强叫我们周末去聚餐。"},
+        {"speaker": "赵磊", "dia_id": "D1:2", "text": "他请客吗？"},
+        {"speaker": "杨柳", "dia_id": "D1:3", "text": "他说在老地方见。"},
+        {"speaker": "赵磊", "dia_id": "D1:4", "text": "行，我带瓶酒。"},
+        {"speaker": "杨柳", "dia_id": "D1:5", "text": "老陈新添了辆摩托。"},
+        {"speaker": "赵磊", "dia_id": "D1:6", "text": "他哪来的钱？"},
+        {"speaker": "杨柳", "dia_id": "D1:7", "text": "听说他接了私活。"},
+        {"speaker": "赵磊", "dia_id": "D1:8", "text": "难怪。"},
+        {"speaker": "杨柳", "dia_id": "D1:9", "text": "周六聚餐几点？"},
+        {"speaker": "赵磊", "dia_id": "D1:10", "text": "七点，别迟到。"},
+        {"speaker": "杨柳", "dia_id": "D1:11", "text": "下班就过去。"},
+        {"speaker": "赵磊", "dia_id": "D1:12", "text": "好。"}
+      ],
+      "session_1_date_time": "2023-04-02 12:00",
+      "session_2": [
+        {"speaker": "杨柳", "dia_id": "D2:1", "text": "志强那辆车出毛病了，送去维修了。"},
+        {"speaker": "赵磊", "dia_id": "D2:2", "text": "刚买就出问题？"},
+        {"speaker": "杨柳", "dia_id": "D2:3", "text": "他说质量不行。"},
+        {"speaker": "赵磊", "dia_id": "D2:4", "text": "快去换一辆。"},
+        {"speaker": "杨柳", "dia_id": "D2:5", "text": "小陈已经去了。"},
+        {"speaker": "赵磊", "dia_id": "D2:6", "text": "那就好。"},
+        {"speaker": "杨柳", "dia_id": "D2:7", "text": "下周我们一起去体检。"},
+        {"speaker": "赵磊", "dia_id": "D2:8", "text": "你到时候提醒我。"},
+        {"speaker": "杨柳", "dia_id": "D2:9", "text": "周末聚餐照常。"},
+        {"speaker": "赵磊", "dia_id": "D2:10", "text": "行。"},
+        {"speaker": "杨柳", "dia_id": "D2:11", "text": "先去取报告。"},
+        {"speaker": "赵磊", "dia_id": "D2:12", "text": "嗯。"}
+      ],
+      "session_2_date_time": "2023-04-16 10:00"
+    },
+    "qa": [
+      {"question": "志强体检前入手了什么？", "answer": "新添了辆摩托", "category": 1, "evidence": ["D1:5"]},
+      {"question": "老陈聚餐后聊了什么？", "answer": "车出毛病送去维修了", "category": 1, "evidence": ["D2:1"]}
+    ]
+  }
+]

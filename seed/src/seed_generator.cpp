@@ -241,11 +241,28 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
 
   // ---- 自由文本：先过 M1 提取，再两路并行 ----
   if (!q.text.empty()) {
+    std::unordered_set<std::string> name_canons;  // 人名归一：alias_of 命中的 canonical 集合
     if (extractor_) {
       Extraction ex = extractor_->extract(q.text);
       for (auto& e : ex.entities) {
-        const Node* n = storage_.find_by_name(NodeKind::Entity, e.surface);
+        // 人名/专名归一（--name-alias 域）：称呼/昵称类实体词面先经别名表精确命中
+        // 判定（alias_of，区别于 normalize 的小写化）。命中时：
+        // ① canonical 实体节点入硬种子（INVOLVES 通道；CONTAINS/INVOLVES 传导弱，
+        //    实体种子只作补充，见 ②）；
+        // ② canonical 词面注入下方 CJK 词法通道的扩展集合（name_canons）——事件按
+        //    变体子串直接成种子（lex 权重），这是称呼类变体达事件的主通道
+        //    （如查询"小李说过什么"圈定"李建国"全部轮次）。
+        // 未加载姓名别名表时 alias_of 必返回空串，行为与历史逐行一致（零回归）。
+        std::string canon = kw_.alias_of(e.surface);
+        const Node* n = canon.empty() ? nullptr
+                                      : storage_.find_by_name(NodeKind::Entity, canon);
+        if (!n) n = storage_.find_by_name(NodeKind::Entity, e.surface);
         if (n) add(n->uid, 1.0, "text");  // 文本中的实体命中 = 硬种子
+        if (!canon.empty()) {
+          const Node* k = kw_.find(canon);
+          if (k) add(k->uid, 1.0, "text");
+          name_canons.insert(canon);
+        }
       }
       for (auto& k : ex.keywords) {
         const Node* n = kw_.find(kw_.normalize(k.word));
@@ -427,6 +444,12 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
         std::vector<std::string> cjks;
         for (auto& k : cex.keywords)
           if (!k.word.empty() && (unsigned char)k.word[0] >= 128) cjks.push_back(k.word);
+        // 人名归一：alias_of 命中的 canonical 词面并入内容词——提问里的称呼/昵称
+        // （老X/小X 提取为实体、不作关键词）由此把全变体轮次直接种子化；canonical
+        // 自身经全变体扩展（variants），覆盖非称呼变体（李经理/建国）轮次。
+        // name_canons 仅在别名表命中时非空（--name-alias 域），off 时零行为差。
+        for (auto& c : name_canons)
+          if (std::find(cjks.begin(), cjks.end(), c) == cjks.end()) cjks.push_back(c);
         if (!cjks.empty()) {
           auto events = storage_.nodes_of_kind(NodeKind::Event);
           std::unordered_map<std::string, int> df;

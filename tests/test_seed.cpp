@@ -250,6 +250,60 @@ static void test_word_edges() {
   CHECK(!b2);
 }
 
+  // 人名/专名归一（--name-alias 域）：称呼提取出的昵称（老X/小X）经别名表归到
+  // canonical——查询侧实体词面 alias_of 命中时：canonical 实体/关键词入硬种子，
+  // 且 canonical 词面注入 CJK 词法通道，全变体轮次（含称呼轮）直接事件级种子化；
+  // 未加载别名表时行为与历史一致（英文人名 Alice 不经归一）。
+static void test_name_alias_bridge() {
+  Fixture f;
+  // M3 别名表 + M2 实体（canonical + Alias 节点）+ M3 canonical 关键词节点
+  f.kw.add_alias("小李", "李建国");
+  Node ent;
+  ent.uid = "ent1"; ent.kind = NodeKind::Entity; ent.name = "李建国"; ent.type = "person";
+  f.s.put_node(ent);
+  Node al;
+  al.uid = "al1"; al.kind = NodeKind::Alias; al.name = "小李";
+  al.attrs["target"] = "ent1";
+  f.s.put_node(al);
+  std::string kuid = f.kw.get_or_create("李建国", "concept");
+  // 事件：一个含 canonical 词面、一个含称呼变体
+  Node ev1, ev2;
+  ev1.uid = "ev1"; ev1.kind = NodeKind::Event; ev1.text = "李建国上周出差了";
+  ev2.uid = "ev2"; ev2.kind = NodeKind::Event; ev2.text = "小李来过电话";
+  f.s.put_node(ev1); f.s.put_node(ev2);
+
+  SeedQuery q;
+  q.text = "小李说过什么";  // M1 称呼模式提取实体 surface "小李"
+  auto seeds = f.sg.gen_seeds(q);
+  bool has_ent = false, has_kw = false, has_ev1 = false, has_ev2 = false;
+  for (auto& sd : seeds) {
+    if (sd.node_uid == "ent1") has_ent = true;
+    if (sd.node_uid == kuid) has_kw = true;
+    if (sd.node_uid == "ev1") has_ev1 = true;  // canonical 词面子串命中
+    if (sd.node_uid == "ev2") has_ev2 = true;  // 变体（小李）经 variants 扩展命中
+  }
+  CHECK(has_ent);   // canonical 实体种子（INVOLVES 通道）
+  CHECK(has_kw);    // canonical 关键词种子（CONTAINS 通道）
+  CHECK(has_ev1);   // canonical 词面事件级种子（CJK 词法通道）
+  CHECK(has_ev2);   // 称呼变体事件级种子（variants 扩展）
+
+  // 零回归：无别名映射的英文人名行为不变（仅实体自身命中，无额外关键词种子）
+  Node alice;
+  alice.uid = "ent2"; alice.kind = NodeKind::Entity; alice.name = "Alice";
+  alice.type = "person";
+  f.s.put_node(alice);
+  SeedQuery q2;
+  q2.text = "did Alice say anything";
+  auto seeds2 = f.sg.gen_seeds(q2);
+  bool has_alice = false, extra_kw = false;
+  for (auto& sd : seeds2) {
+    if (sd.node_uid == "ent2") has_alice = true;
+    if (sd.node_uid == kuid) extra_kw = true;  // Alice→alice 是小写化不是映射
+  }
+  CHECK(has_alice);
+  CHECK(!extra_kw);
+}
+
 int main() {
   test_hard_seeds();
   test_soft_seeds();
@@ -258,5 +312,6 @@ int main() {
   test_lex_seeds();
   test_conditional_normalize();
   test_word_edges();
+  test_name_alias_bridge();
   return AME_TEST_REPORT();
 }
