@@ -66,6 +66,7 @@ struct EvidenceItem {
   double score = 0;        // 三路加权总分
   std::string source_kind; // user|assistant|vision|declared|observed|derived
   std::string via;         // 来源通道：lex（词面倒排）| fallback（P2a 兜底）| fact（事实命中）
+                           // | prox（P3b seq 邻近加成）| expand（P3b 共现联想扩散）
   uint64_t ref_obs = 0;    // 来源观测 seq（观测证据=其 seq；事实证据=source_obs，可无）；
                            // 上层经 Mem::obs(seq) 回溯 meta（如 dia_id），0=无法回溯
 };
@@ -83,6 +84,14 @@ class View {
   // P2a 兜底候选池大小（owner 最近 N 条观测，默认 20）；0 = 禁用兜底
   void set_fallback_pool(int n) { fallback_pool_ = n; }
 
+  // P3b seq 邻近加成窗口：词面命中观测的 seq±window 邻居（同 owner）作为
+  // proximity 候选，词面分按与命中观测的 seq 距离 1/d 衰减；tier 同正常层
+  // （不抢兜底地板）。0 = 禁用（默认 2）
+  void set_proximity_window(int w) { proximity_window_ = w; }
+  // P3b 共现联想扩散开关（默认开）：词面种子命中 → MemIndex::expand 扩候选 →
+  // 统一进打分管线；扩散候选只贡献候选不直接给分（lex=0，走可靠性/时间分）
+  void set_expand_enabled(bool on) { expand_enabled_ = on; }
+
   // 查询时合成（设计 §4.4 evidence()）：
   //   ① 索引召回：观测全文 ∪ 事实命中（fold 当前值，尊重冲销）
   //   ② 打包：user 提问自动附下一条 assistant 回答
@@ -97,7 +106,9 @@ class View {
   const MemIndex& index_;
   const ReliabilityTable& reliab_;
   double alpha_ = 1.0, beta_ = 1.0, gamma_ = 1.0;
-  int fallback_pool_ = 20;  // P2a 兜底：owner 最近 N 条观测（0=禁用）
+  int fallback_pool_ = 20;     // P2a 兜底：owner 最近 N 条观测（0=禁用）
+  int proximity_window_ = 2;   // P3b 邻近加成窗口（0=禁用）
+  bool expand_enabled_ = true; // P3b 共现联想扩散开关
 };
 
 }  // namespace ame

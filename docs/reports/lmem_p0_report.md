@@ -400,3 +400,209 @@ bench 侧：
 2. 单一 kind 数据集上 kind 级反馈天然无排序差（P2.4 归因）；P2 设计中的
    "LLM 提取插件"上线后来源 kind 多样化，反馈闭环的排序效应才可在 bench 观测。
 3. App 侧 LmemEngine.declare 接线（声明入口 UI/orchestrator 调用点）。
+
+---
+
+# AME 2.0 P3 验收报告（追加）：P3a miss 分类诊断 + P3b 邻近加成/联想扩散
+
+> 依据：lmem_p0_report.md P2 节（sample50 覆盖率 lmem 0.490/graph 0.448，cat1 双端
+> 0.150、cat3 lmem 0.250）+ 设计文档 §9（联想扩散扩展口）/§10（P3 行）。
+> 全部数字可一键复跑（命令见 P3.7，D6 纪律）。
+
+## P3.1 P3a miss 分类诊断（先行，D1 判决标准预固定）
+
+**工具链**（诊断与正式管线同一口径，同一 exe / 同一 `--store lmem` 取证路径 /
+同一 `k_pool=60`）：`StoreAnswer.candidates` 在 `LmemStore::answer_question` 内
+从 Mem.recall 输出原样带出（非旁路重算）+ CLI `--cand-dump` + 新脚本
+`bench/scripts/bench_diagnose_misses.py`（分词逐字节复刻 memindex_tokenize：
+CJK 二元组 + ASCII 小写词）。产物：`docs/reports/lmem_p3_miss_taxonomy.md`
+（分类分布 + 逐题表）+ `bench/runs/lmem_p3/`（dump/candidates/明细 JSON）。
+
+**判决标准（D1，先于 P3b/c 实现锁定）**：A 改述鸿沟 = 候选池无金标 且 问题↔金标轮
+最大词面重合度 < 0.05（重合度 = |tok(q)∩tok(gold)|/|tok(q)|）；B 排序出局 = 候选池
+有金标但终排 top-k=10 无金标；C 其他（含重合度≥0.05 仍无金标 = 词面召回通道漏召回）。
+**规范口径 = P2 管线**，由最终 commit 加 `--prox-window 0 --no-expand` 复现
+（开关关闭与 P2 逐比特等价，test_lstore ⑦ 验证）。
+
+### 分类分布（sample50，有金标 n=48；D1 判决用的 P3a 规范口径）
+
+| category | n | HIT | A 改述鸿沟 | B 排序出局 | C 其他 | miss 数 | A 占 miss 比 |
+|---|---|---|---|---|---|---|---|
+| cat1 | 10 | 4 | 2 | 1 | 3 | 6 | **0.333** |
+| cat2 | 10 | 8 | 0 | 1 | 1 | 2 | 0.000 |
+| cat3 | 8 | 3 | 1 | 1 | 3 | 5 | 0.200 |
+| cat4 | 10 | 6 | 1 | 1 | 2 | 4 | 0.250 |
+| cat5 | 10 | 6 | 1 | 2 | 1 | 4 | 0.250 |
+| **总体** | 48 | 27 | 5 | 6 | 10 | 21 | 0.238 |
+
+### P3c 触发判定：不触发（不实施 n-gram 软相似通道）
+
+- 判定依据（D1 预固定）：cat1 miss 中 A 类占比 = 2/6 = **0.333 < 0.40** → 不触发。
+- cat1 miss 实为 **C 主导**（3/6）：重合度 0.125~0.222 却进不了候选池——漏召回
+  的主因是词面形态差（如 political vs politics、所有格 's 切分）而非纯改述；
+  A 类仅 2 题（q3 零重合、q18 零重合）。
+- 事后观测（不改判）：P3b 落地后 cat1 A 占比降至 1/6=0.167（q18 金标经扩散
+  进池转 B），同样 <0.40；D1 先行判决不受 P3b 落地影响。
+
+## P3.2 P3b 交付内容（memindex / memview，两处开关默认开）
+
+**memindex（共现关联边）**：
+- `add_observation`：观测内 token 去重后两两共现计数（双向登记），df>50% 超高频
+  词跳过（写入时按当前 owner 文档数近似判定）；同时登记 `obs_terms_[seq]`
+  去重词表作扩散种子。`drop()` 一并清空（可重建纪律不破：rebuild 与增量同路径）。
+- `expand(seed_seqs, owner, max_hop=2, top_m=30)`：种子词权 1.0 → 沿共现边逐跳
+  扩散（nw = w×(共现计数/out_deg)×0.5，出度归一仿 1.x conduction 简化版）→
+  到达词经观测倒排映射回 owner 内 seq（剔种子词/种子 seq，多词命中权重累加）→
+  (权重 desc, seq asc) 全序取 top_m。
+
+**memview（召回管线）**：词面种子命中 → prox 邻近加成 → expand 扩候选 →
+统一进打分管线：
+- **seq 邻近加成**：词面命中观测的 seq±window 邻居（同 owner，默认 2，
+  `set_proximity_window(0)` 禁用）作为 proximity 候选，词面分 = 命中观测词面
+  IDF 和 × 1/d（seq 距离衰减），tier 同正常层（不抢兜底地板），via=`prox`；
+- **扩散候选**：via=`expand`，lex=0（**只贡献候选不直接给分**），按
+  可靠性/时间分参与同层排序；
+- 兜底去重口径由"仅 lex 命中"扩为"全部正常层 seq（lex/prox/expand）"——
+  P3b 下兜底不再重复任何已进池观测（语义更干净；开关全关时与 P2 逐比特等价）；
+- 排序全序不变：(tier desc, score desc, seq asc)，兜底 tier=0 恒居正常候选之后
+  （排序退化断言保持）。
+
+**bench 开关**：`--prox-window N`（默认 2）、`--no-expand`，供 P3a 规范口径复现
+与通道 A/B。
+
+**P2 既有断言处理**：⑦兜底召回改为通道隔离（开关关闭下原断言原样运行，一个
+字未改）；④rebuild 逐比特、⑧可靠性闭环、⑤零副作用等均原样全绿（新通道开启
+下）。新增 ⑩邻近加成（1/d 衰减排序、窗口开关）、⑪共现扩散（hop2 扩零重叠观测、
+只贡献候选不给分、开关关闭即无）。test_lstore 断言 223→**243**；ctest **20/20**。
+
+## P3.3 对照表（P2 → P3，基线模式）与硬目标判定
+
+| 指标 | P2 lmem | P3 lmem | 硬目标 | 判定 |
+|---|---|---|---|---|
+| sample50 总体覆盖率 | 0.490 | **0.490** | ≥0.490 | ✅（恰达线） |
+| cat1 | 0.150 | 0.150 | C 主导无显性靶，如实报 | ➖ 不变 |
+| cat2 | 0.800 | 0.800 | 不回退（±0.05） | ✅ |
+| cat3 | 0.250 | 0.250 | **≥0.35** | ❌ **未达标（偏差，归因见 P3.4）** |
+| cat4 | 0.600 | 0.600 | 不回退（±0.05） | ✅ |
+| cat5 | 0.600 | 0.600 | 不回退（±0.05） | ✅ |
+| judge（sample50，LLM） | 0.540 | 见 P3.3.1 | ≥0.520 不降 | 见下 |
+
+逐题覆盖率 diff（P2 口径 vs P3 口径同题单 48 题）：**48/48 逐题一致**
+（`bench/runs/lmem_p3/diag_dump_{p2mode,postp3}.ndjson` 比对）。证据文本
+顺序 45/50 题变化（prox/expand 候选改变 BM25 stable 同分序），但 top-10
+证据 dia_id 集合不变 → 答题输入集合不变。
+
+**机制归因（不粉饰）**：P3b 确实把金标拉进了候选池——post-P3 分类表 A 5→2、
+C 10→12、B 6→7，q18/q27/q105/q156 金标经 prox/expand 进池（如 q27 的 D7:5
+池 rank 58）——但这些扩散候选与查询零内容词重叠，在 bench 终排（P0 固定纪律：
+与 1.x 同一内容词 BM25-lite 公式）下沉底，进不了 top-10；同时 prox 候选
+（tier=1、正分数）在池层挤出最弱的词面候选（q50 的 D12:1 池 rank 55→出局、
+q34 池 rank 58→出局；两者 BM25≈0 本就进不了 top-10，覆盖率不受影响）。**净效果：候选池构成改善
+（A/C→B 转化 4 题），终排遮蔽使 sample50 指标零变化**——prox/expand 的价值
+要在终排融合证据配额（P4）时才可观测，列为 P4 观测项，不吹收益。
+
+### P3.3.1 judge（LLM 模式，走 bench/cache）
+
+> **环境记录（不粉饰，同 P2 先例）**：本次 `--llm --quick` 跑分遭遇 DeepSeek API
+> 故障窗口——答题批量请求全部 `curl: (28) Operation timed out / http 0`（每条
+> 3 次重试全失败），12:35 单条 20s 小请求探测亦 0 字节超时，判断为上游限流/过载，
+> 与本任务代码无关（留痕：`bench/runs/lmem_p3/llm_run2.log`、
+> `runs/lmem_p0/graph_llm/locomo_sample50.log`）。按时间盒纪律停线不无限重试，
+> **本次无有效 judge 跑分**。
+>
+> **judge 硬目标判定（≥0.520 不降）**：P3 的 top-10 证据 dia_id 集合与 P2 逐题
+> 完全一致（48/48，见 P3.3 逐题 diff）→ 答题输入实质相同 → judge 预期与 P2 健康
+> 实测 0.540 持平（P2 归档基线，api_calls=5/cache_hits=99）。恢复后一条命令补测：
+> `python bench/scripts/bench_compare_sample.py --llm --quick`（45/50 题证据顺序
+> 变化 → 部分冷 prompt，预计 5~10min）。
+
+## P3.4 cat3 未达标归因（不粉饰）
+
+cat3 5 个 miss 的问题↔金标轮词面重合只剩功能词：q2（'in,to'，ov 0.182）、
+q42（'to,a'，0.077）、q50（'be,s'，0.250）、q27（'a'，0.125）、q64（零重合，A 类）。
+这是**改述鸿沟**题型，其对口通道恰是被 D1 判定排除的 P3c 软相似（字符二元组
+Jaccard 不需外部模型，正是这类 political/politics、reading/writing 形态差的
+补救）。D1 判决标准先于实现锁定，不因结果不如意而事后放宽——**cat3 ≥0.35
+本次未达标，偏差如实记录**，建议作为 P4 输入重新评估 P3c 触发条件（如按
+cat3 而非 cat1 判定，A+C 功能词重合类占比 5/5=100%）。
+
+## P3.5 蓝方自检
+
+1. **expand 爆炸控制**：出池 top_m=30 硬上限；每词每跳取共现计数 top-64 邻居
+   （partial_sort）；df>50% 词不进共现（第一道闸）；×0.5/跳指数衰减 + frontier
+   空即停。实测：sample50 全量摄入+召回 lmem 0.1s→1.3s（含共现统计与扩散），
+   仍远低于 60min 时间盒。
+2. **邻近加成与兜底/tier 交互**：prox/expand tier=1 与 lex 同层竞争，tier=0
+   兜底恒居正常候选之后（排序键未动，排序退化断言保持）；prox 词面分借用命中
+   观测的 IDF 和而非自命中，避免给"邻近"虚构词面证据；兜底去重扩口径后，
+   P3b 下兜底通道贡献更少（正常层已覆盖），开关全关与 P2 逐比特等价（⑦）。
+3. **共现计数内存**：cooc 双向 per-owner 邻接表 + obs_terms_ per-seq 去重词表；
+   df≤50% 门槛砍掉超高频词（口语中 'the/of' 类），实测 10 对话 4190 轮无压力。
+   已知边界：cooc 边数随单观测词数 w 按 w²/2 增长、随观测总量线性增长，超长
+   owner（百万轮级）需分片或共现采样——本期规模不触发。
+4. **P2 可靠性分与新打分路合成**：prox/expand 两路都读 ReliabilityTable
+   （β·rel 路），反馈闭环（+0.02/−0.05、封底封顶）对两路候选同样生效；
+   ⑧的 rank_of 语义基于零命中查询（无种子 → 两路静默不产出），rank 断言
+   原样通过。prox 的时间分按邻居自身 ts 计算（衰减不继承命中观测）。
+5. **诊断脚本与正式管线口径一致性**：同一 exe、同一 `--store lmem` 取证路径、
+   同一 `cfg.k_pool=60`；候选池在 `LmemStore::answer_question` 内从 Mem.recall
+   输出原样带出（非旁路重算，杜绝口径漂移）；分词器为 memindex_tokenize 逐字节
+   复刻（CJK 段滑窗二元组、ASCII 小写词、单字退一元，均一致）；p2mode 连跑两次
+   miss_taxonomy JSON md5 一致（输出确定性）。环境纪律：exe 动态链
+   libstdc++-6.dll，须 `export PATH="$(dirname $(which g++)):$PATH"` 后跑
+   （子 shell 自行探测 which 在本机原生 Windows 下会误中 Git 自带 g++，
+   脚本不自行探测，与 bench_compare_sample 同纪律）。
+
+## P3.6 耗时（时间盒 ≤60min）
+
+| 阶段 | 实测 |
+|---|---|
+| ctest 20/20 | ~10s（test_lstore 243 断言） |
+| 基线模式全套（4 配置 × 2 后端） | <10s（sample50：graph 0.7s / lmem 1.3s） |
+| P3a 诊断脚本 | <2s/次（含 exe 起停） |
+| LLM 模式（--llm --quick） | 无效跑分（API 故障窗口，~10min 后按纪律停线；单条探测亦超时，见 P3.3.1） |
+
+## P3.7 复跑命令（D6）
+
+```bash
+export PATH="$(dirname $(which g++)):$PATH"
+cmake --build build-win -j8 && (cd build-win && ctest --output-on-failure)   # 20/20
+export AME_MINGW_BIN="$(dirname $(which g++))"
+python bench/scripts/bench_diagnose_misses.py            # P3a 规范口径（P2 管线）→ docs 报告
+python bench/scripts/bench_diagnose_misses.py --post-p3  # P3b 后观测口径 → runs/ 明细
+python bench/scripts/bench_compare_sample.py             # 基线口径 → runs/lmem_p0/
+python bench/scripts/bench_compare_sample.py --llm --quick  # judge 口径（走 bench/cache）
+```
+
+## P3.8 改动文件清单
+
+2.0 侧：
+- `memindex/include/ame/memindex/memindex.h` / `memindex/src/memindex.cpp`：
+  共现关联边（add_observation 两两计数、df>50% 跳过）、obs_terms_ 种子词表、
+  expand()（max_hop=2/top_m=30/×0.5/出度归一/top-64 邻居上限）、drop 清空。
+- `memview/include/ame/memview/memview.h` / `memview/src/memview.cpp`：
+  prox 邻近加成（1/d 衰减、via=prox、窗口开关默认 2）、expand 候选接入
+  （lex=0、via=expand、开关默认开）、兜底去重口径扩为全部正常层 seq。
+- `tests/test_lstore.cpp`：⑦通道隔离（P3b 开关关闭下原断言原样）+ 新增 ⑩⑪
+  （断言 223→243）。
+
+bench 侧：
+- `bench/include/ame/bench/store.h`：StoreAnswer 增 `candidates`（候选池全量，
+  lmem 填、graph 空）；StoreEvidence.via 文档补 prox|expand。
+- `bench/src/store.cpp`：LmemStore::answer_question 抽出 fill_ev 并带出
+  candidates（与终排证据同一回溯口径）。
+- `bench/cli/main.cpp`：`--cand-dump`（仅 lmem 生效，graph 告警忽略）、
+  `--prox-window` / `--no-expand` 通道开关。
+- `bench/scripts/bench_diagnose_misses.py`（新）：P3a 分类诊断（默认 P2 规范
+  口径，`--post-p3` 观测口径）。
+
+产物：`bench/runs/lmem_p3/`（diag_dump/candidates/miss_taxonomy 的 p2mode 与
+postp3 双口径产物）、`docs/reports/lmem_p3_miss_taxonomy.md`。
+
+## P3.9 遗留与下一步
+
+1. cat3 硬目标未达标（P3.4 归因：改述鸿沟题型，对口 P3c 被 D1 排除）——P4 输入：
+   重新评估 P3c 触发条件（按目标 category 判定，或降阈值并预先登记）。
+2. prox/expand 候选在 bench BM25 终排下被遮蔽（P3.3 机制归因）——P4 终排融合/
+   证据配额落地后按同题单复测两路收益。
+3. cooc 内存随 owner 规模增长（P3.5.3 边界），超长 owner 需分片/采样。

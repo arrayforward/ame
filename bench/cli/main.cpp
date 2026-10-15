@@ -42,6 +42,7 @@ struct Cli {
   std::string store = "graph";   // --store graph|lmem：存储后端（默认 graph=1.x Engine）
   int limit = 0;
   std::string dump_path;       // --dump：逐题结果 NDJSON 落盘路径
+  std::string cand_dump_path;  // --cand-dump：lmem 候选池全量 NDJSON 落盘路径（P3a miss 诊断）
   std::string build_lexicon;   // --build-lexicon：词频表路径（构建词典后退出）
   std::string lexicon_out = "bench/data/lexicon.json";
   std::string load_lexicon;    // --load-lexicon：词典灌库路径
@@ -54,6 +55,8 @@ struct Cli {
                                // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
+  int prox_window = 2;         // --prox-window N：lmem P3b 邻近加成窗口（0=禁用，默认 2）
+  bool expand_on = true;       // --no-expand：lmem P3b 共现联想扩散关闭
 };
 
 // parse_args 伪代码：键值扫描，未知键忽略；--abstain-categories 为逗号分隔整数列表。
@@ -77,6 +80,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--config") cli.cfg.config_path = next();
     else if (a == "--out") cli.cfg.out_json = next();
     else if (a == "--dump") cli.dump_path = next();
+    else if (a == "--cand-dump") cli.cand_dump_path = next();
     else if (a == "--build-lexicon") cli.build_lexicon = next();
     else if (a == "--lexicon-out") cli.lexicon_out = next();
     else if (a == "--lexicon-topn") cli.lexicon_topn = std::atoi(next().c_str());
@@ -96,6 +100,8 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--load-graph") cli.load_graph = next();
     else if (a == "--feedback-dir") cli.feedback_dir = next();
     else if (a == "--fb-exp") cli.fb_exp = next();
+    else if (a == "--prox-window") cli.prox_window = std::atoi(next().c_str());
+    else if (a == "--no-expand") cli.expand_on = false;
     else if (a == "--weights") {  // α,β,γ 覆盖（M14 调优结果验证用）
       std::string v = next();
       std::sscanf(v.c_str(), "%lf,%lf,%lf", &cli.w_alpha, &cli.w_beta, &cli.w_gamma);
@@ -125,6 +131,7 @@ void usage() {
                "      [--cache-dir bench/cache] [--config bench/config/deepseek.local.json]\n"
                "      [--out report.json] [--abstain-threshold 0.15] [--abstain-categories 5]\n"
                "      [--dump results.ndjson]（逐题结果落盘，失败分析用）\n"
+               "      [--cand-dump cands.ndjson]（仅 lmem：候选池全量落盘，P3a miss 诊断用）\n"
                "      [--fb-exp DIR]（仅 lmem：P2b 双 pass 反馈实验，pass1 判分→feedback 落盘\n"
                "       →pass2 同题单只跑召回对比金标证据排序）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
@@ -272,6 +279,13 @@ int main(int argc, char** argv) {
   };
   std::vector<AggJob> agg_jobs;
 
+  // P3a 诊断：lmem 候选池全量落盘（与正式取证同一 k_pool 口径）
+  FILE* cand_df = nullptr;
+  if (!cli.cand_dump_path.empty() && cli.store == "lmem")
+    cand_df = std::fopen(cli.cand_dump_path.c_str(), "w");
+  else if (!cli.cand_dump_path.empty())
+    std::fprintf(stderr, "[warn] --cand-dump 仅 --store lmem 生效，已忽略\n");
+
   for (auto& c : cases) {
     // --question-ids 固定样本提速：该 case 无任何被请求的问题 → 整个跳过（含摄入）。
     // 安全性：每 case 独立引擎、跨 case 无共享状态，未命中 case 的摄入对结果零影响。
@@ -290,6 +304,9 @@ int main(int argc, char** argv) {
       const std::string fb_root = cli.fb_exp.empty() ? "" : cli.fb_exp + "/" + c.conversation_id;
       auto mem_up = std::make_unique<Mem>(fb_root);
       Mem* mem_ptr = mem_up.get();
+      // P3b 通道开关（--prox-window/--no-expand；P3a 诊断 P2 口径复现用）
+      mem_ptr->view().set_proximity_window(cli.prox_window);
+      mem_ptr->view().set_expand_enabled(cli.expand_on);
       LmemStore ls(mem_ptr, c.conversation_id);
       IngestStats st = ls.ingest_case(c);
       if (!cli.fb_exp.empty()) {
@@ -313,6 +330,25 @@ int main(int argc, char** argv) {
         p.conv = c.conversation_id;  // P2b fb-exp：pass2 按 case 重开 Mem 时对齐
         StoreAnswer sa = ls.answer_question(q, cli.cfg);
         p.base = std::move(sa.result);
+        if (cand_df) {  // P3a：候选池全量（终排前，视图序 rank 从 1 计）
+          Json j = Json::object();
+          j["question_id"] = Json::string(q.id);
+          j["category"] = Json::number(q.category);
+          Json cands = Json::array();
+          for (size_t ci = 0; ci < sa.candidates.size(); ++ci) {
+            Json cj = Json::object();
+            cj["rank"] = Json::number((double)ci + 1);
+            cj["ref_obs"] = Json::number((double)sa.candidates[ci].ref_obs);
+            cj["dia_id"] = Json::string(sa.candidates[ci].dia_id);
+            cj["via"] = Json::string(sa.candidates[ci].via);
+            cj["score"] = Json::number(sa.candidates[ci].score);
+            cands.push(std::move(cj));
+          }
+          j["candidates"] = std::move(cands);
+          std::string line = j.dump();
+          std::fwrite(line.data(), 1, line.size(), cand_df);
+          std::fputc('\n', cand_df);
+        }
         for (auto& ev : sa.evidence) {
           p.ev_refs.push_back({ev.ref_obs, ev.source_kind, ev.via});  // P2b 反馈定位
           p.ev_texts.push_back(std::move(ev.text));
@@ -735,6 +771,10 @@ int main(int argc, char** argv) {
       std::fclose(df);
       std::fprintf(stderr, "[dump] %s (%zu 题)\n", cli.dump_path.c_str(), pendings.size());
     }
+  }
+  if (cand_df) {
+    std::fclose(cand_df);
+    std::fprintf(stderr, "[cand-dump] %s\n", cli.cand_dump_path.c_str());
   }
 
   // 步骤6：报表输出（控制台 + 可选 JSON）

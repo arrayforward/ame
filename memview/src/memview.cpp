@@ -95,11 +95,17 @@ void View::set_weights(double alpha, double beta, double gamma) {
   gamma_ = gamma;
 }
 
-// 伪代码：evidence 合成（设计 §4.4 + P2a 兜底）
+// 伪代码：evidence 合成（设计 §4.4 + P2a 兜底 + P3b 邻近加成/联想扩散）
 //   步骤1：索引召回观测候选（pool = max(k×4, 16)）与事实候选；
 //   步骤2：观测候选逐项打分；user 提问查 Q→A 邻接打包 "问题\n→ 回答"；
-//   步骤2b：词面命中 < k/2 → 兜底候选池（owner 最近 N 条，user 优先 + ts 新鲜）
+//   步骤2b：P3b seq 邻近加成——词面命中观测的 seq±window 邻居（同 owner）进池，
+//           词面分按 1/d 衰减，tier 同正常层（不抢兜底地板）；
+//   步骤2c：P3b 共现联想扩散——词面种子 → index.expand 扩候选（只贡献候选
+//           不直接给分：lex=0，走可靠性/时间分），tier 同正常层；
+//   步骤2d：词面命中 < k/2 → 兜底候选池（owner 最近 N 条，user 优先 + ts 新鲜）
 //           以 tier=0 补入（排序恒低于正常候选，只兜零证据弃答）；
+//           去重口径 = 全部正常层观测候选 seq（lex+prox+expand），
+//           已进池的观测不再以兜底身份重复出现；
 //   步骤3：事实候选按 (entity,attr) 分组，逐组 fold latest（尊重冲销），
 //          命中格式化为 "entity.attr=value"，以 fold 的 effective 打时间分；
 //   步骤4：全部证据按 (tier desc, score desc, seq asc) 排序；
@@ -110,18 +116,18 @@ std::vector<EvidenceItem> View::synthesize(const std::string& query,
   struct Cand {
     EvidenceItem item;
     uint64_t seq = 0;
-    int tier = 1;  // 1=正常召回；0=P2a 兜底（恒排正常候选之后）
+    int tier = 1;  // 1=正常召回（lex/prox/expand/fact）；0=P2a 兜底（恒排正常候选之后）
   };
   std::vector<Cand> cands;
 
   // ①+② 观测证据与 Q→A 打包
   const int pool = std::max(k * 4, 16);
   const std::vector<IndexHit> ohits = index_.search(query, owner, pool);
-  std::unordered_set<uint64_t> lex_hit_seqs;
+  std::unordered_set<uint64_t> obs_cand_seqs;  // 正常层观测候选 seq（lex/prox/expand），兜底去重用
   for (const IndexHit& h : ohits) {
     const Observation* o = obs_.get(h.seq);
     if (!o) continue;
-    lex_hit_seqs.insert(o->seq);
+    obs_cand_seqs.insert(o->seq);
     double lex = 0;
     for (const auto& t : h.terms) lex += index_.idf(t, owner);
     const double decay = FactStore::time_decay(
@@ -145,7 +151,75 @@ std::vector<EvidenceItem> View::synthesize(const std::string& query,
     cands.push_back(std::move(c));
   }
 
-  // ②b P2a 兜底：词面命中 < k/2 → owner 最近 N 条观测补候选池。
+  // ②b P3b seq 邻近加成：词面命中观测的 seq±d 邻居（同 owner）作为 proximity 候选。
+  // 词面分 = 命中观测词面分 × 1/d（seq 距离衰减）；tier 同正常层，不抢兜底地板。
+  // 一邻居多命中时先处理者先得（ohits 序确定 ⇒ 输出确定）。
+  if (proximity_window_ > 0) {
+    for (const IndexHit& h : ohits) {
+      double base_lex = 0;
+      for (const auto& t : h.terms) base_lex += index_.idf(t, owner);
+      for (int d = 1; d <= proximity_window_; ++d) {
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+          const int64_t ns = (int64_t)h.seq + sgn * d;
+          if (ns < 1) continue;
+          const uint64_t nseq = (uint64_t)ns;
+          if (!obs_cand_seqs.insert(nseq).second) continue;
+          const Observation* po = obs_.get(nseq);
+          if (!po || po->owner != owner) continue;
+          const double decay = FactStore::time_decay(
+              facts_.half_life_days(Reality::Observed), po->ts, now);
+          Cand c;
+          c.seq = po->seq;
+          c.item.ts = po->ts;
+          c.item.source_kind = po->kind;
+          c.item.via = "prox";
+          c.item.ref_obs = po->seq;
+          c.item.score = alpha_ * base_lex / (double)d +
+                         beta_ * reliab_.get(po->kind) + gamma_ * decay;
+          if (po->kind == "user") {
+            const uint64_t aseq = index_.next_assistant_seq(owner, po->seq);
+            const Observation* a = aseq ? obs_.get(aseq) : nullptr;
+            c.item.text = a ? po->text + "\n→ " + a->text : po->text;
+          } else {
+            c.item.text = po->text;
+          }
+          cands.push_back(std::move(c));
+        }
+      }
+    }
+  }
+
+  // ②c P3b 共现联想扩散：词面种子 → expand 扩候选 → 统一进打分管线。
+  // 扩散只贡献候选不直接给分：lex=0，按可靠性/时间分参与同层排序。
+  if (expand_enabled_ && !ohits.empty()) {
+    std::vector<uint64_t> seeds;
+    seeds.reserve(ohits.size());
+    for (const IndexHit& h : ohits) seeds.push_back(h.seq);
+    for (uint64_t s : index_.expand(seeds, owner, 2, 30)) {
+      if (!obs_cand_seqs.insert(s).second) continue;
+      const Observation* o = obs_.get(s);
+      if (!o || o->owner != owner) continue;
+      const double decay = FactStore::time_decay(
+          facts_.half_life_days(Reality::Observed), o->ts, now);
+      Cand c;
+      c.seq = o->seq;
+      c.item.ts = o->ts;
+      c.item.source_kind = o->kind;
+      c.item.via = "expand";
+      c.item.ref_obs = o->seq;
+      c.item.score = beta_ * reliab_.get(o->kind) + gamma_ * decay;
+      if (o->kind == "user") {
+        const uint64_t aseq = index_.next_assistant_seq(owner, o->seq);
+        const Observation* a = aseq ? obs_.get(aseq) : nullptr;
+        c.item.text = a ? o->text + "\n→ " + a->text : o->text;
+      } else {
+        c.item.text = o->text;
+      }
+      cands.push_back(std::move(c));
+    }
+  }
+
+  // ②d P2a 兜底：词面命中 < k/2 → owner 最近 N 条观测补候选池。
   // 触发含"零命中"（零证据弃答的对口修复）；0 < 命中 < k/2 时仅作尾部补足——
   // tier=0 保证兜底候选排序恒低于全部正常候选，不与正常召回混排竞争。
   if (fallback_pool_ > 0 && (int)ohits.size() < k / 2) {
@@ -166,7 +240,7 @@ std::vector<EvidenceItem> View::synthesize(const std::string& query,
     int taken = 0;
     for (const Observation* o : fpool) {
       if (taken >= k) break;
-      if (lex_hit_seqs.count(o->seq)) continue;  // 词面已命中的不重复进池
+      if (obs_cand_seqs.count(o->seq)) continue;  // 正常层（lex/prox/expand）已进池的不重复进池
       const double decay = FactStore::time_decay(
           facts_.half_life_days(Reality::Observed), o->ts, now);
       Cand c;

@@ -59,6 +59,12 @@ class MemIndex {
   uint64_t next_assistant_seq(const std::string& owner, uint64_t user_seq) const;
   // 槽位目录：fact.entity -> fact seqs（nullptr = 槽位不存在）
   const std::vector<uint64_t>* slot_facts(const std::string& entity) const;
+  // P3b 联想扩散：词面种子 seq → 共现关联边逐跳扩散（出度归一 ×0.5/跳），
+  // 返回候选观测 seq（top_m 上限，权重 desc/seq asc 全序）；只贡献候选不直接给分。
+  // 无共现边/无种子返回空；max_hop<=0 或 top_m<=0 返回空。
+  std::vector<uint64_t> expand(const std::vector<uint64_t>& seed_seqs,
+                               const std::string& owner, int max_hop = 2,
+                               int top_m = 30) const;
   // IDF：ln(1 + N_docs/df)，owner 作用域（观测语料；df=0 时保守给 ln(N+1)+1）
   double idf(const std::string& term, const std::string& owner) const;
   // owner 观测文档数（IDF 的 N）
@@ -87,6 +93,12 @@ class MemIndex {
   std::unordered_map<std::string, uint64_t> last_user_;                // owner -> 最近 user seq
   std::unordered_map<std::string, std::unordered_map<uint64_t, uint64_t>> qa_next_;  // owner -> {user seq -> assistant seq}
   std::unordered_map<std::string, size_t> obs_count_;                  // owner -> 观测文档数
+  // P3b 共现关联边：owner -> term -> 邻接 term -> 共现计数（观测内去重后两两，
+  // 双向登记；df>50% 超高频词跳过，写入时按当前 owner 文档数近似判定）
+  using Cooc = std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>>;
+  std::unordered_map<std::string, Cooc> cooc_;
+  // P3b 观测去重词表（seq -> tokens）：联想扩散的种子词来源
+  std::unordered_map<uint64_t, std::vector<std::string>> obs_terms_;
 };
 
 }  // namespace ame

@@ -30,13 +30,16 @@ struct StoreEvidence {
   // ---- 以下 lmem 专用：P2b 反馈闭环经 ref_obs+source_kind+via 定位证据来源 kind ----
   uint64_t ref_obs = 0;          // EvidenceItem.ref_obs（graph 恒 0）
   std::string source_kind;       // 证据来源 kind（user/assistant/… 或 declared/observed/derived）
-  std::string via;               // 来源通道：lex|fallback|fact（P2a 兜底标记）
+  std::string via;               // 来源通道：lex|fallback|fact|prox|expand（P2a 兜底/P3b 新通道标记）
 };
 
 // 一题取证结果：metrics 口径 + 逐条证据
 struct StoreAnswer {
   AnswerResult result;                 // answer_text/abstained/score/evidence_dia_ids 沿用既有口径
   std::vector<StoreEvidence> evidence;
+  // P3a 诊断：lmem 的 Mem.recall 候选池全量（终排 BM25 之前，k_pool 条，按视图序）；
+  // graph 后端不填。供 miss 分类区分"没进候选池"与"进了被截"。
+  std::vector<StoreEvidence> candidates;
 };
 
 // 窄接口：--store graph|lmem 两后端的公共面（摄入 + 取证）

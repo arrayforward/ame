@@ -113,6 +113,30 @@ StoreAnswer LmemStore::answer_question(const BenchQuestion& q, const BenchConfig
   const int64_t now = qdate > 0 ? qdate : (max_ts > 0 ? max_ts : 1700000000);
 
   auto items = mem_->recall(q.question, owner_, cfg.k_pool, now);
+
+  // 证据 → StoreEvidence（dia_id 经 ref_obs → 观测 meta 回溯；日期前缀与 graph 打包同格式）
+  auto fill_ev = [&](const EvidenceItem& it) {
+    StoreEvidence ev;
+    ev.text = date_prefix(it.ts) + it.text;
+    ev.ts = it.ts;
+    ev.score = it.score;
+    ev.ref_obs = it.ref_obs;          // P2b：反馈闭环定位证据来源
+    ev.source_kind = it.source_kind;
+    ev.via = it.via;
+    if (it.ref_obs != 0) {
+      const Observation* o = mem_->obs(it.ref_obs);
+      if (o) {
+        const Json* d = o->meta.find("dia_id");
+        if (d) ev.dia_id = d->as_str();
+      }
+    }
+    return ev;
+  };
+
+  // P3a 诊断：候选池全量（终排前）随答案一并带出，口径与正式管线同一 k_pool
+  sa.candidates.reserve(items.size());
+  for (auto& it : items) sa.candidates.push_back(fill_ev(it));
+
   // 终排：与 1.x answer() 步骤4 同一公式（content_scores_for_texts 在候选集内统计 idf）
   std::vector<std::string> texts;
   for (auto& it : items) texts.push_back(it.text);
@@ -128,21 +152,11 @@ StoreAnswer LmemStore::answer_question(const BenchQuestion& q, const BenchConfig
   for (size_t idx : ord) {
     const EvidenceItem& it = items[idx];
     if (it.via == "fallback") ++n_fallback;
-    StoreEvidence ev;
-    ev.text = date_prefix(it.ts) + it.text;
-    ev.ts = it.ts;
-    ev.score = it.score;
-    ev.ref_obs = it.ref_obs;          // P2b：反馈闭环定位证据来源
-    ev.source_kind = it.source_kind;
-    ev.via = it.via;
+    StoreEvidence ev = fill_ev(it);
     std::string session_mark;
     if (it.ref_obs != 0) {
       const Observation* o = mem_->obs(it.ref_obs);
-      if (o) {
-        const Json* d = o->meta.find("dia_id");
-        if (d) ev.dia_id = d->as_str();
-        if (!o->channel.empty()) session_mark = "S:" + o->channel;
-      }
+      if (o && !o->channel.empty()) session_mark = "S:" + o->channel;
     }
     sa.evidence.push_back(ev);
     ar.evidence_uids.push_back("obs:" + std::to_string(it.ref_obs));

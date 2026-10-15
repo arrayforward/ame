@@ -89,12 +89,39 @@ void MemIndex::post(Posting& p, const std::string& term, const std::string& owne
 
 // 伪代码：登记一条观测
 //   步骤1：obs_count_[owner]++（IDF 的 N）；
-//   步骤2：text 分词逐词进 obs_posting_；
-//   步骤3：kind==user 记 last_user_；kind==assistant 且 last_user_ 非空，
+//   步骤2：text 分词去重，登记 obs_terms_[seq]（P3b 扩散种子词表）；
+//   步骤3：P3b 共现关联边——去重词两两计数（双向），df>50% 超高频词跳过
+//          （df 按当前 posting 长度、N 含本条近似判定，防超高频词炸内存/带偏扩散）；
+//   步骤4：分词逐词进 obs_posting_；
+//   步骤5：kind==user 记 last_user_；kind==assistant 且 last_user_ 非空，
 //          写 Q→A 邻接（last_user_ → 本 seq）。
 void MemIndex::add_observation(const Observation& o) {
   ++obs_count_[o.owner];
-  for (const auto& t : memindex_tokenize(o.text)) post(obs_posting_, t, o.owner, o.seq);
+  std::vector<std::string> uniq;
+  {
+    std::unordered_set<std::string> seen;
+    for (const auto& t : memindex_tokenize(o.text))
+      if (seen.insert(t).second) uniq.push_back(t);
+  }
+  obs_terms_[o.seq] = uniq;
+  const size_t n = obs_count_[o.owner];
+  std::vector<size_t> co_idx;  // 参与共现统计的词下标（df ≤ 50%）
+  for (size_t i = 0; i < uniq.size(); ++i) {
+    size_t df = 0;
+    auto it = obs_posting_.find(uniq[i]);
+    if (it != obs_posting_.end()) {
+      auto oit = it->second.find(o.owner);
+      if (oit != it->second.end()) df = oit->second.size();
+    }
+    if (df * 2 <= n) co_idx.push_back(i);
+  }
+  auto& co = cooc_[o.owner];
+  for (size_t a = 0; a < co_idx.size(); ++a)
+    for (size_t b = a + 1; b < co_idx.size(); ++b) {
+      ++co[uniq[co_idx[a]]][uniq[co_idx[b]]];
+      ++co[uniq[co_idx[b]]][uniq[co_idx[a]]];
+    }
+  for (const auto& t : uniq) post(obs_posting_, t, o.owner, o.seq);
   if (o.kind == "user") {
     last_user_[o.owner] = o.seq;
   } else if (o.kind == "assistant") {
@@ -167,6 +194,88 @@ const std::vector<uint64_t>* MemIndex::slot_facts(const std::string& entity) con
   return it == slot_dir_.end() ? nullptr : &it->second;
 }
 
+// ---------------- P3b 联想扩散（共现关联边） ----------------
+
+// 伪代码：联想扩散（仿 1.x conduction 的简化版）
+//   步骤1：种子 seq → 观测去重词表，种子词权 1.0（多种子同词取 1.0）；
+//   步骤2：逐跳沿共现边扩散：nw = w × (共现计数/out_deg(t)) × 0.5，
+//          每词每跳最多取共现计数 top 64 邻居（爆炸控制），到达权累加进 acc；
+//   步骤3：到达词（剔除种子词）经观测倒排映射回 owner 内 seq（剔除种子 seq），
+//          多词命中权重累加；
+//   步骤4：按 (权重 desc, seq asc) 全序取 top_m。
+std::vector<uint64_t> MemIndex::expand(const std::vector<uint64_t>& seed_seqs,
+                                       const std::string& owner, int max_hop,
+                                       int top_m) const {
+  if (max_hop <= 0 || top_m <= 0) return {};
+  auto cit = cooc_.find(owner);
+  if (cit == cooc_.end()) return {};
+  std::unordered_map<std::string, double> acc, frontier;
+  std::unordered_set<std::string> seed_terms;
+  std::unordered_set<uint64_t> seed_set(seed_seqs.begin(), seed_seqs.end());
+  for (uint64_t s : seed_seqs) {
+    auto it = obs_terms_.find(s);
+    if (it == obs_terms_.end()) continue;
+    for (const auto& t : it->second) {
+      seed_terms.insert(t);
+      acc[t] = 1.0;
+      frontier[t] = 1.0;
+    }
+  }
+  if (frontier.empty()) return {};
+  for (int hop = 0; hop < max_hop; ++hop) {
+    std::unordered_map<std::string, double> next;
+    for (const auto& [t, w] : frontier) {
+      auto ait = cit->second.find(t);
+      if (ait == cit->second.end()) continue;
+      const auto& adj = ait->second;
+      uint64_t out_deg = 0;
+      for (const auto& [u, c] : adj) out_deg += (uint64_t)c;
+      if (out_deg == 0) continue;
+      // 爆炸控制：邻居按共现计数取 top 64（超高频词已被共现统计的 df 门槛弱化，
+      // 这里是第二道闸，防单个词的邻接表过长拖慢扩散）
+      std::vector<std::pair<const std::string*, uint32_t>> nb;
+      nb.reserve(adj.size());
+      for (const auto& [u, c] : adj) nb.emplace_back(&u, c);
+      if (nb.size() > 64) {
+        std::partial_sort(nb.begin(), nb.begin() + 64, nb.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+        nb.resize(64);
+      }
+      for (const auto& [up, c] : nb)
+        next[*up] += w * ((double)c / (double)out_deg) * 0.5;
+    }
+    for (auto& [u, w] : next) {
+      auto it = acc.find(u);
+      if (it == acc.end()) acc.emplace(u, w);
+      else it->second += w;
+    }
+    frontier = std::move(next);
+    if (frontier.empty()) break;
+  }
+  std::unordered_map<uint64_t, double> seq_w;
+  for (const auto& [t, w] : acc) {
+    if (w <= 0.0 || seed_terms.count(t)) continue;
+    auto it = obs_posting_.find(t);
+    if (it == obs_posting_.end()) continue;
+    auto oit = it->second.find(owner);
+    if (oit == it->second.end()) continue;
+    for (uint64_t s : oit->second) {
+      if (seed_set.count(s)) continue;
+      seq_w[s] += w;
+    }
+  }
+  std::vector<std::pair<uint64_t, double>> v(seq_w.begin(), seq_w.end());
+  std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) {
+    if (a.second != b.second) return a.second > b.second;
+    return a.first < b.first;
+  });
+  if ((int)v.size() > top_m) v.resize(top_m);
+  std::vector<uint64_t> out;
+  out.reserve(v.size());
+  for (const auto& [s, w] : v) out.push_back(s);
+  return out;
+}
+
 // 伪代码：IDF = ln(1 + N/df)，N=owner 观测文档数，df=该词在该 owner 的 df
 double MemIndex::idf(const std::string& term, const std::string& owner) const {
   const double n = (double)owner_doc_count(owner);
@@ -188,6 +297,8 @@ void MemIndex::drop() {
   last_user_.clear();
   qa_next_.clear();
   obs_count_.clear();
+  cooc_.clear();       // P3b 共现关联边（可重建缓存的一部分）
+  obs_terms_.clear();  // P3b 扩散种子词表
 }
 
 // 伪代码：全量重建

@@ -8,6 +8,11 @@
  *   ⑥ 公共域隔离：owner A 抹除后 B 与 public 的 recall/profile 不变
  *   ⑦ P2a 兜底召回：零词面重叠 → fallback 证据（user 优先+新鲜度）；
  *     正常路径无 fallback 且排序不变；部分命中时 fallback 恒居正常候选之后
+ *     （P3b 邻近/扩散通道关闭下测，通道隔离）
+ *   ⑩ P3b seq 邻近加成：命中观测 seq±window 邻居进池（via=prox），
+ *     词面分 1/d 衰减排序；窗口 0 关闭
+ *   ⑪ P3b 共现联想扩散：词面种子经共现边 hop2 扩到零词面重叠观测
+ *     （via=expand，只贡献候选不给分）；开关关闭即无 expand 候选
  *   ⑧ P2b 可靠性闭环：负反馈 rank 降/正反馈 rank 升；reliability.json 重启保留
  *   ⑨ P2c G1–G3 校验门：declare 权威、allocate 先开槽、长度硬校验、public 拦截
  */
@@ -396,6 +401,9 @@ static void test_public_domain_isolation() {
 static void test_fallback_recall() {
   Mem m;  // 内存态
   const int64_t T = 1700000000;
+  // P3b 通道隔离：本测只验 P2a 兜底语义（邻近加成/联想扩散在 ⑩⑪ 单独测）
+  m.view().set_proximity_window(0);
+  m.view().set_expand_enabled(false);
   m.remember("u1", "c1", "user", "我喜欢在雨天读科幻小说", T);
   m.remember("u1", "c1", "assistant", "科幻是个好东西", T + 60);
   m.remember("u1", "c1", "user", "周末去爬山拍照", T + 120);
@@ -538,6 +546,78 @@ static void test_declare_gates() {
   CHECK(fd2.fact.value == "8:00");
 }
 
+// ---------------- ⑩ P3b seq 邻近加成 ----------------
+
+static void test_proximity_bonus() {
+  Mem m;  // 内存态
+  const int64_t T = 1700000000;
+  // seq1 词面命中；seq2/seq3 为 seq±1/±2 邻居；seq5 距 4 超出窗口
+  m.remember("u1", "c1", "user", "中心命中 量子物理话题", T);
+  m.remember("u1", "c1", "assistant", "紧邻回复 甲", T + 60);
+  m.remember("u1", "c1", "user", "次邻 提问 乙", T + 120);
+  m.remember("u1", "c1", "assistant", "远端回复 丙", T + 180);
+  m.remember("u1", "c1", "user", "窗口外 丁", T + 240);
+
+  auto idx_of = [&](const std::vector<EvidenceItem>& r, uint64_t ref) -> int {
+    for (size_t i = 0; i < r.size(); ++i)
+      if (r[i].ref_obs == ref) return (int)i;
+    return -1;
+  };
+  const auto r = m.recall("量子物理", "u1", 10, T + 1000);
+  // 词面命中 seq1 在池；prox 候选 seq2（d=1）/seq3（d=2）进池；seq5 不是 prox
+  CHECK(idx_of(r, 1) >= 0 && r[idx_of(r, 1)].via == "lex");
+  CHECK(idx_of(r, 2) >= 0 && r[idx_of(r, 2)].via == "prox");
+  CHECK(idx_of(r, 3) >= 0 && r[idx_of(r, 3)].via == "prox");
+  CHECK(idx_of(r, 5) < 0 || r[idx_of(r, 5)].via != "prox");
+  // 词面分 1/d 衰减：seq1（全额+user 可靠性）> seq2（d=1）> seq3（d=2）
+  CHECK(idx_of(r, 1) < idx_of(r, 2));
+  CHECK(idx_of(r, 2) < idx_of(r, 3));
+
+  // 开关关闭：prox 通道消失，lex 命中仍在
+  m.view().set_proximity_window(0);
+  const auto r2 = m.recall("量子物理", "u1", 10, T + 1000);
+  CHECK(idx_of(r2, 1) >= 0);
+  for (const auto& e : r2) CHECK(e.via != "prox");
+}
+
+// ---------------- ⑪ P3b 共现联想扩散 ----------------
+
+static void test_cooc_expand() {
+  Mem m;  // 内存态
+  const int64_t T = 1700000000;
+  // seq1/seq8 词面命中（含 龙井）；seq4 只含 茶叶（与查询零词面重叠），
+  // 且位于两种子 seq±2 窗口之外（prox 通道抢不到）；
+  // 龙井 ↔ 茶叶 在 seq1 共现 → 扩散 hop1 到达 seq4 的共现词，hop2 收敛到 seq4
+  m.remember("u1", "c1", "user", "龙井茶叶产区在西湖", T);
+  m.remember("u1", "c1", "assistant", "今天天气不错", T + 60);
+  m.remember("u1", "c1", "user", "昨天去了公园", T + 120);
+  m.remember("u1", "c1", "assistant", "茶叶保存需要密封避光", T + 180);
+  m.remember("u1", "c1", "user", "周末去爬山", T + 240);
+  m.remember("u1", "c1", "assistant", "晚上吃火锅", T + 300);
+  m.remember("u1", "c1", "user", "明天去看展", T + 360);
+  m.remember("u1", "c1", "assistant", "今天买了龙井", T + 420);
+
+  auto idx_of = [&](const std::vector<EvidenceItem>& r, uint64_t ref) -> int {
+    for (size_t i = 0; i < r.size(); ++i)
+      if (r[i].ref_obs == ref) return (int)i;
+    return -1;
+  };
+  const auto r = m.recall("龙井", "u1", 10, T + 1000);
+  // seq1/seq8 词面命中；seq4 经共现扩散进池（via=expand）
+  CHECK(idx_of(r, 1) >= 0 && r[idx_of(r, 1)].via == "lex");
+  CHECK(idx_of(r, 8) >= 0 && r[idx_of(r, 8)].via == "lex");
+  CHECK(idx_of(r, 4) >= 0 && r[idx_of(r, 4)].via == "expand");
+
+  // 只贡献候选不直接给分：expand 候选的词面分路为 0 → 总分低于词面命中
+  CHECK(r[idx_of(r, 4)].score < r[idx_of(r, 1)].score);
+
+  // 开关关闭：expand 通道消失，词面命中不受影响
+  m.view().set_expand_enabled(false);
+  const auto r2 = m.recall("龙井", "u1", 10, T + 1000);
+  CHECK(idx_of(r2, 1) >= 0 && idx_of(r2, 8) >= 0);
+  for (const auto& e : r2) CHECK(e.via != "expand");
+}
+
 int main() {
   test_erase_semantics();
   test_fold_arbitration();
@@ -548,5 +628,7 @@ int main() {
   test_fallback_recall();
   test_feedback_reliability();
   test_declare_gates();
+  test_proximity_bonus();
+  test_cooc_expand();
   return AME_TEST_REPORT();
 }
