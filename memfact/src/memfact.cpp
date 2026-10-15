@@ -344,4 +344,12 @@ size_t FactStore::owner_count(const std::string& owner) const {
   return it == facts_.end() ? 0 : it->second.size();
 }
 
+bool FactStore::has_slot(const std::string& owner, const std::string& entity) const {
+  auto it = facts_.find(owner);
+  if (it == facts_.end()) return false;
+  for (const Fact& f : it->second)
+    if (f.entity == entity) return true;
+  return false;
+}
+
 }  // namespace ame

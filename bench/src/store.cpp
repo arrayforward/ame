@@ -102,7 +102,15 @@ IngestStats LmemStore::ingest_case(const BenchCase& c) {
 StoreAnswer LmemStore::answer_question(const BenchQuestion& q, const BenchConfig& cfg) {
   StoreAnswer sa;
   TimePoint qdate = parse_session_date(q.question_date, 0);
-  const int64_t now = qdate > 0 ? qdate : (last_ts_ > 0 ? last_ts_ : 1700000000);
+  // now 兜底：last_ts_ 为 0（如持久化恢复后新建的 store）时从观测层扫最大 ts，
+  // 保证同一份数据任意构造路径下 recall 的 now 口径一致（P2b 双 pass 可比性）
+  int64_t max_ts = last_ts_;
+  if (max_ts <= 0) {
+    mem_->obs_store().for_owner(owner_, [&](const Observation& o) {
+      if (o.ts > max_ts) max_ts = o.ts;
+    });
+  }
+  const int64_t now = qdate > 0 ? qdate : (max_ts > 0 ? max_ts : 1700000000);
 
   auto items = mem_->recall(q.question, owner_, cfg.k_pool, now);
   // 终排：与 1.x answer() 步骤4 同一公式（content_scores_for_texts 在候选集内统计 idf）
@@ -116,12 +124,17 @@ StoreAnswer LmemStore::answer_question(const BenchQuestion& q, const BenchConfig
   if ((int)ord.size() > cfg.k) ord.resize(cfg.k);
 
   AnswerResult& ar = sa.result;
+  int n_fallback = 0;  // P2a 观测：兜底通道触发计数（归因用）
   for (size_t idx : ord) {
     const EvidenceItem& it = items[idx];
+    if (it.via == "fallback") ++n_fallback;
     StoreEvidence ev;
     ev.text = date_prefix(it.ts) + it.text;
     ev.ts = it.ts;
     ev.score = it.score;
+    ev.ref_obs = it.ref_obs;          // P2b：反馈闭环定位证据来源
+    ev.source_kind = it.source_kind;
+    ev.via = it.via;
     std::string session_mark;
     if (it.ref_obs != 0) {
       const Observation* o = mem_->obs(it.ref_obs);
@@ -138,6 +151,9 @@ StoreAnswer LmemStore::answer_question(const BenchQuestion& q, const BenchConfig
   }
   ar.score = ord.empty() ? 0.0 : items[ord.front()].score;
   ar.abstained = ord.empty();
+  if (n_fallback > 0)  // P2a 归因：兜底通道触发即报（词面命中 < k_pool/2）
+    std::fprintf(stderr, "  [fallback] %s: 兜底证据 %d/%zu 条\n", q.id.c_str(),
+                 n_fallback, ord.size());
   if (ar.abstained) {
     ar.answer_text = "unanswerable";
   } else {

@@ -24,11 +24,67 @@
 
 namespace ame {
 
+namespace {
+
+// UTF-8 码点计数（G2 长度限制按"字"而非字节：CJK 一字一码点）
+size_t utf8_len(const std::string& s) {
+  size_t n = 0;
+  for (unsigned char c : s)
+    if ((c & 0xC0) != 0x80) ++n;
+  return n;
+}
+
+// G3 规则过滤（P2c 收窄版）：public 域槽位只允许 public owner 写入，
+// 个人 owner 写 public:* 一律拦截（防个人域污染公共域，§8）；
+// 个人域写入不拦（规则库留待后续域分治）。
+bool public_write_blocked(const std::string& owner, const std::string& entity) {
+  return entity.rfind("public:", 0) == 0 && owner != "public";
+}
+
+}  // namespace
+
+// 可靠性表持久化路径（root 为空 = 内存态，不持久化）
+static std::string reliability_path(const std::string& root) {
+  return root + "/shards/reliability.json";
+}
+
+// 原子落盘：先写临时文件再 rename（中断时最多留下 .tmp，不损坏旧表）
+static void reliability_save(const std::string& root, const ReliabilityTable& t) {
+  if (root.empty()) return;
+  std::error_code ec;
+  std::filesystem::create_directories(root + "/shards", ec);
+  const std::string tmp = reliability_path(root) + ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << t.to_json().dump();
+  }
+  std::filesystem::rename(tmp, reliability_path(root), ec);
+  if (ec) {  // rename 失败（跨设备等）：退化为直接重写
+    std::ofstream f(reliability_path(root), std::ios::binary | std::ios::trunc);
+    if (f) f << t.to_json().dump();
+  }
+}
+
+static void reliability_load(const std::string& root, ReliabilityTable& t) {
+  if (root.empty()) return;
+  std::ifstream f(reliability_path(root), std::ios::binary);
+  if (!f) return;
+  std::stringstream ss;
+  ss << f.rdbuf();
+  bool ok = false;
+  const Json j = Json::parse(ss.str(), &ok);
+  if (ok) t.load_json(j);
+}
+
 // 伪代码：构造网关
 //   步骤1：按 root 构造观测店与事实店（空 root = 内存态）；
-//   步骤2：视图层注入三店 const 引用；
-//   步骤3：从两店 replay 建索引（持久化目录下恢复到最新状态）。
-Mem::Mem(std::string root) : obs_(root), facts_(root), view_(obs_, facts_, index_) {
+//   步骤2：视图层注入三店 const 引用 + 来源可靠性表；
+//   步骤3：加载 reliability.json（P2b 闭环重启保留，缺文件 = 默认表）；
+//   步骤4：从两店 replay 建索引（持久化目录下恢复到最新状态）。
+Mem::Mem(std::string root)
+    : root_(std::move(root)), obs_(root_), facts_(root_), view_(obs_, facts_, index_, reliab_) {
+  reliability_load(root_, reliab_);
   rebuild_index();
 }
 
@@ -50,9 +106,17 @@ Result<Observation> Mem::remember(const std::string& owner, const std::string& c
   return Result<Observation>::success(std::move(stored));
 }
 
+// declare：G1 槽位"本次创建"恒成立（declare 即创建语义，§7 四动词）；
+// G2 attr/value 长度硬校验；G3 public 域拦截。任一失败返回错误码、整批不写入。
 Err Mem::declare(const std::string& owner, const std::string& entity,
                  const std::map<std::string, std::string>& attrs, int64_t ts) {
   if (owner.empty() || entity.empty()) return Err::InvalidArg;
+  for (const auto& kv : attrs) {
+    if (kv.first.empty() || utf8_len(kv.first) > 64)
+      return Err::InvalidArg;  // G2：attr 非空且 ≤64 字
+    if (utf8_len(kv.second) > 256) return Err::InvalidArg;  // G2：value ≤256 字
+  }
+  if (public_write_blocked(owner, entity)) return Err::InvalidArg;  // G3
   for (const auto& kv : attrs) {
     Fact f;
     f.ts = ts;
@@ -68,11 +132,22 @@ Err Mem::declare(const std::string& owner, const std::string& entity,
   return Err::Ok;
 }
 
+// rememberFact（allocate）：G1 槽位须已存在（declare 或其他写入创建过），
+// 不允许 allocate 凭空开槽（§7：开槽是 declare 的语义）；
+// G2 长度硬校验；G3 public 域拦截。任一失败返回错误码、不写入。
 Result<Fact> Mem::rememberFact(const std::string& owner, const std::string& entity,
                                const std::string& attr, const std::string& value,
                                int64_t ts, double confidence, uint64_t source_obs) {
   if (owner.empty() || entity.empty() || attr.empty())
     return Result<Fact>::fail(Err::InvalidArg, "owner/entity/attr 为空");
+  if (utf8_len(attr) > 64)
+    return Result<Fact>::fail(Err::InvalidArg, "G2: attr 超长(>64 字)");
+  if (utf8_len(value) > 256)
+    return Result<Fact>::fail(Err::InvalidArg, "G2: value 超长(>256 字)");
+  if (public_write_blocked(owner, entity))
+    return Result<Fact>::fail(Err::InvalidArg, "G3: 个人域不可写 public 槽位");
+  if (!facts_.has_slot(owner, entity))
+    return Result<Fact>::fail(Err::InvalidArg, "G1: 槽位不存在（先 declare 创建）");
   Fact f;
   f.ts = ts;
   f.owner = owner;
@@ -85,6 +160,21 @@ Result<Fact> Mem::rememberFact(const std::string& owner, const std::string& enti
   const Fact stored = facts_.append(std::move(f));
   index_.add_fact(stored);
   return Result<Fact>::success(stored);
+}
+
+// ---- 来源可靠性闭环（P2b，设计 §6）----
+
+// feedback：evidence 被采纳 → 来源 kind +0.02（封顶 1.0）；被纠正 → −0.05
+// （封底 0.05，罚>奖防刷）；调整即持久化（root 非空时），重启经 reliability.json 保留。
+Err Mem::feedback(const std::string& owner, const EvidenceItem& evidence, bool positive) {
+  if (owner.empty()) return Err::InvalidArg;
+  std::string kind = evidence.source_kind;
+  // 观测证据以观测实际 kind 为准（fact 证据 source_kind 已是 reality 名）
+  if (evidence.via != "fact" && evidence.ref_obs != 0)
+    if (const Observation* o = obs_.get(evidence.ref_obs)) kind = o->kind;
+  reliab_.adjust(kind, positive);
+  reliability_save(root_, reliab_);
+  return Err::Ok;
 }
 
 // ---- 读路径 ----

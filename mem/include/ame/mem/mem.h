@@ -5,8 +5,11 @@
 //
 // 本文件思路：对外声明 Mem 网关。写路径：remember 入观测层并增量更新索引；
 //           declare 写 Declared facts（权威，confidence 恒 1.0）；
-//           rememberFact 直写 Observed fact（P0 无自动提取，§5 写路径的
-//           M1 提取器与 G1–G3 校验门为 P2 插件）；读路径 recall/profile
+//           rememberFact 直写 Observed fact（P0 无自动提取）；
+//           P2c：rememberFact/declare 写入路径加 G1–G3 校验门（槽位存在/
+//           长度硬校验/public 域拦截），失败返回错误码不写入；
+//           P2b：feedback 调整来源可靠性表（ReliabilityTable）并持久化，
+//           视图层打分改读该表（替代 P0 硬编码表）；读路径 recall/profile
 //           委托视图层与 fold，零写副作用；erase 两级语义走观测+事实两店
 //           并重建索引（索引是可重建缓存，erase 后无残留）。
 //
@@ -47,14 +50,25 @@ class Mem {
                                const std::string& kind, const std::string& text,
                                int64_t ts, Json meta = Json());
   // declare：显式声明属性（权威，confidence 恒 1.0，reality=declared）；
-  // entity 为槽位引用（"owner:self" / "owner:名" / "public:名"）
+  // entity 为槽位引用（"owner:self" / "owner:名" / "public:名"）；
+  // P2c G1–G3 校验门：G2 attr/value 长度硬校验、G3 public 域拦截，失败返回错误码不写入
   Err declare(const std::string& owner, const std::string& entity,
               const std::map<std::string, std::string>& attrs, int64_t ts);
-  // rememberFact：Observed fact 直写（P0 无自动提取）；source_obs 溯源可传 0
+  // rememberFact：Observed fact 直写（P0 无自动提取）；source_obs 溯源可传 0；
+  // P2c G1–G3 校验门：G1 槽位须已存在（declare 创建）、G2 长度硬校验、G3 public 拦截
   Result<Fact> rememberFact(const std::string& owner, const std::string& entity,
                             const std::string& attr, const std::string& value,
                             int64_t ts, double confidence = 1.0,
                             uint64_t source_obs = 0);
+
+  // ---- 来源可靠性闭环（P2b，设计 §6）----
+  // feedback：evidence 被采纳 → 其来源 kind 的 reliability +0.02（封顶 1.0）；
+  // 被纠正/判错 → −0.05（封底 0.05）；调整立即持久化（root/shards/reliability.json，
+  // 重启保留）。evidence 经 EvidenceItem.source_kind 定位 kind（观测=user/assistant/…，
+  // 事实=declared/observed/derived）。owner 预留（当前可靠性表全局按 kind）。
+  Err feedback(const std::string& owner, const EvidenceItem& evidence, bool positive);
+  // 当前可靠性表（只读访问；测试与进阶视图用）
+  const ReliabilityTable& reliability() const { return reliab_; }
 
   // ---- 读路径 ----
   // recall：视图层合成证据（永不落盘，零存储副作用）
@@ -86,10 +100,12 @@ class Mem {
   const View& view() const { return view_; }
 
  private:
+  std::string root_;         // 空 = 内存态（可靠性表不持久化）
   ObsStore obs_;
   FactStore facts_;
   MemIndex index_;
-  View view_;
+  ReliabilityTable reliab_;  // P2b：来源可靠性闭环表（持久化 reliability.json）
+  View view_;                // 依赖 reliab_，成员序必须在其后
 };
 
 // ---- 1.x → 2.0 迁移工具（P1，设计 §10 P1）----

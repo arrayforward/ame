@@ -187,3 +187,216 @@ bench 侧：
 3. P3：cat2 时序题 lmem 与 graph 持平（0.700）但绝对值不高，多分辨率时间桶 + 联想
    扩散落地后按 cat2 12 题专项复测。
 4. 全量 LoCoMo JSON 入 bench/data 后，发布口径全量双后端对照（本报告口径不变）。
+
+---
+
+# AME 2.0 P2 验收报告（追加）：兜底层召回 + 来源可靠性闭环 + declare/G1–G3
+
+> 依据：本报告 §5.1（头号实测缺陷归因）+ 设计文档 §6（冲突裁决/来源可靠性）、
+> §10 P2 行。全部数字可一键复跑（命令见 P2.7，D6 纪律）。
+> 口径变更声明：本次修复了逐题 dump 的 evidence_dia_ids 上限（10→30 条目），
+> 理由与影响见 P2.3——**P0 归档的覆盖率数字是截断口径，P2 双后端同用新口径重跑，
+> 横向对照公平，纵向与 P0 对比时已标注**。
+
+## P2.1 交付内容
+
+**P2a 兜底层召回通道**（`memview`，不改索引结构）：
+- `View::synthesize`：owner 词面命中 < k/2 时启用兜底候选池 = owner 最近 N 条
+  （默认 20，可 `set_fallback_pool`）观测，按 (speaker=user 优先, ts 新鲜, seq 决胜)
+  排序取 top-k 进打分管线；词面分按命中计（兜底可为 0），可靠性/时间分照常；
+- `EvidenceItem` 新增 `via` 区分来源通道 `lex|fallback|fact`（`source_kind` 保持
+  原语义：观测 kind / 事实 reality 名，供可靠性闭环定位）；
+- **不与正常召回混排竞争**：兜底候选 tier=0，排序键 (tier desc, score desc, seq asc)
+  恒居正常候选之后，只作尾部补足；词面命中 ≥ k/2 时零兜底候选，正常路径与 P0
+  逐比特一致（排序键退化为 P0 的 (score desc, seq asc)，test_index_rebuild
+  逐比特断言全绿验证）；
+- 兜底只兜"零证据弃答"：正常召回非空时（tier 地板）也不会挤占任何正常证据的位次。
+
+**P2b 来源可靠性闭环**（`mem` 网关 + `memview` + bench）：
+- 新增 `ReliabilityTable`（kind→reliability，默认表与 P0 硬编码逐比特一致；
+  读写加锁）：正反馈 +0.02（封顶 1.0）、负 −0.05（封底 0.05，罚>奖防刷）；
+- `Mem::feedback(owner, EvidenceItem, positive)`：按证据来源 kind 调整（观测证据
+  经 ref_obs 回溯实际 kind，事实证据用 reality 名）；root 非空即持久化
+  `shards/reliability.json`（tmp+rename 原子落盘），重启保留；
+- 视图层打分改读网关表（替代 P0 硬编码表）；fold 裁决的 reality 级可靠性暂维持
+  静态表（任务口径仅要求视图层，列为已知边界）；
+- bench：`StoreEvidence` 增 ref_obs/source_kind/via；`LmemStore` 接 1.x 反馈语义
+  （judge≥1 → 正、否则负，作用于该题 top-1 证据）；新 CLI `--fb-exp DIR` +
+  脚本 `bench/scripts/bench_feedback_exp.py` 实现双 pass 实验（P2.4）。
+
+**P2c declare 原语 + G1–G3 校验门**：
+- JNI：`nativeMemDeclare(h, entity, attrsJson, ts)` + `LmemEngine.declare(...)`
+  （Java 侧已暴露方法，App 接线留待后续，未动 MemEngine 接口）；
+- 写入路径校验（mem 网关内，失败返回错误码、整批不写入）：
+  - G1：rememberFact（allocate）要求槽位已存在（declare 创建）；declare 即创建
+    语义恒过 G1；
+  - G2：attr 非空且 ≤64 字、value ≤256 字（UTF-8 码点计，硬校验）；
+  - G3：public 域槽位仅 public owner 可写（个人写 public:* 拦截，个人域不拦）。
+
+## P2.2 验收项对照（硬目标）
+
+| 硬目标 | P0 基线 | P2 实测 | 判定 |
+|---|---|---|---|
+| locomo_mini q3 不再零证据弃答（lmem 覆盖率回到 1.000） | 0.000（弃答） | **1.000**（2/2 金标入 top-k） | ✅ |
+| sample50 lmem 覆盖率 ≥ 0.432 不回退 | 0.432（截断口径） | **0.490**（新口径；graph 同口径 0.448） | ✅ |
+| sample50 judge ≥ 0.520 不降 | 0.560 | **0.540**（lmem）；graph 路径未动，P0 归档 0.520 | ✅ |
+| cat2 时序保持 0.700 | 0.700 | **0.800**（覆盖率，双后端同值） | ✅ |
+| ctest 现有 20 测试全绿 + 新增断言 | 20/20 | **20/20**（test_lstore 138→223 断言，+85） | ✅ |
+
+## P2.3 对照表与逐题 diff
+
+### judge（LLM 模式，走 bench/cache）
+
+| 配置 | graph P0（归档，路径零改动） | lmem P0 | lmem P2 |
+|---|---|---|---|
+| locomo_mini (n=5) | 0.800 | 0.800 | 见下方环境记录¹ |
+| longmemeval_mini | 1.000 | 1.000 | 环境记录¹ |
+| beam_mini | 0.750 | 0.750 | 环境记录¹ |
+| locomo_sample50 | 0.520 | 0.560 | **0.540** |
+
+¹ **环境记录（不粉饰）**：验收窗口 DeepSeek API 约 50 分钟 503/120s 超时故障
+（单条小请求探测可过、bench 批量即超时，判断为上游限流/过载，与本任务代码
+无关——失败日志均留痕 `curl: (28) Operation timed out`）。三个 lmem 小夹具的
+证据文本因 P2a 兜底尾部发生变化 → 全部冷 prompt → judge 跑分在故障窗口内
+transport 全失败（answers 回退 baseline、judge 空响应计 no，judge=0.000 为
+**无效跑分，不计入**）。graph 三夹具纯缓存复现 P0 数字（0/6/8/10 api 调用），
+佐证 graph 路径零行为变化。sample50 lmem judge=0.540 为故障窗口外的健康
+实测（api_calls=5 / cache_hits=99，5 次冷调用全部成功）——**硬目标判定只采用
+健康实测与 P0 归档基线，废弃故障窗口跑分**。小夹具 lmem judge 恢复 API 后
+按 P2.7 命令一条即补测（预期 q0-q3 证据可直接作答，q4 兜底作答对抗题参考
+"无法回答"判 no，量级与 P0 0.800 相当）。
+
+### 覆盖率（基线模式，dump 口径上限 10→30 条目）
+
+| 配置 | graph P0 | lmem P0 | graph P2 | lmem P2 |
+|---|---|---|---|---|
+| locomo_mini (n=4) | 1.000 | 0.750 | 1.000 | **1.000** |
+| locomo_sample50 (n=48) | 0.391 | 0.432 | 0.448 | **0.490** |
+| sample50 cat1 | 0.125 | 0.125 | 0.150 | 0.150 |
+| sample50 cat2 | 0.700 | 0.700 | 0.800 | 0.800 |
+| sample50 cat3 | 0.062 | 0.188 | 0.125 | 0.250 |
+| sample50 cat4 | 0.500 | 0.500 | 0.500 | 0.600 |
+| sample50 cat5 | 0.500 | 0.600 | 0.600 | 0.600 |
+
+**口径变更归因（不粉饰）**：P0 的逐题 dump 把 evidence_dia_ids 截到 10 条目，
+而 lmem 每条证据落 dia_id+"S:会话" 两个条目——top-k=10 条证据只落盘前 5 条，
+q3 被救回的金标排在第 6-9 条时被截掉，覆盖率虚低。本次上限放宽到 30 条目
+（≈top-k 全量），**对双后端一视同仁**（graph 覆盖率也因此 0.391→0.448、
+cat2 0.700→0.800）。这不是引擎变强，是测量修复；两表均已标注。
+
+### 兜底通道触发归因（新增 stderr 计数 `[fallback]`）
+
+- locomo_mini：5/5 题触发兜底（夹具仅 9 条观测，词面命中恒 < k_pool/2=30）；
+  q3 全 9 条证据来自兜底（零词面命中），q0-q2 兜底证据恒居词面证据之后
+  （tier 地板），覆盖率保持 1.000——**不与正常召回混排竞争的实测验证**；
+- locomo_sample50：**0 题触发**（对话体量大 + 分词器不过滤停用词，命中数
+  恒 ≥30）。即 sample50 的 lmem 覆盖率变化全部来自口径修复，兜底通道在该
+  题单上零副作用。
+
+### 逐题 diff（sample50，P2 vs P2-graph 同口径）
+
+- lmem 优于 graph 2 题：conv-26:q22（cat3）、conv-26:q107（cat3，0→1.000）；
+- lmem 无落后于 graph 的题；
+- P0 的 conv-26:q104 近失（cat4）在本口径下双端均未命中金标（0.000），
+  列 P3 观测。
+
+## P2.4 双 pass 反馈实验（P2b）
+
+`python bench/scripts/bench_feedback_exp.py --quick`（sample50，pass1 全走缓存）：
+- pass1 判分 50 题，反馈落盘 50 条（judge≥1 正、否则负，top-1 证据来源 kind，
+  同 1.x 语义）；pass2 同目录重开 Mem（replay 恢复观测/事实/可靠性），
+  **同题单只跑召回，零 LLM 调用**（本阶段在全部 LLM 阶段之后，不触碰 client）；
+- 结果：**up=0 same=27 down=0 nogold=23**（逐题表
+  `bench/runs/lmem_p2/feedback_rank_report.md`）；
+- **归因（结构性零变化，不粉饰）**：LoCoMo 数据 speaker 为角色名，bench 映射后
+  全部观测 kind=assistant——单一来源 kind 的候选集里，kind 级 reliability 是
+  全局平移，不改变任何两两相对序；且终排 BM25 不读后端的可靠性分。反馈机制
+  本身的"负反馈 rank 降 / 正反馈 rank 升 / 重启保留"由 test_lstore ⑧
+  （user/assistant 混合 kind）单测验证。端到端管线（落盘 50 条、
+  reliability.json 重启保留、双 pass rank 报告）本次实测打通。
+
+## P2.5 蓝方自检
+
+1. **线程安全（reliability 表读写 vs 单 io 线程）**：ReliabilityTable 内部
+   mutex，get/adjust/to_json/load_json 全加锁；JNI 侧本就 per-handle mutex 串行化，
+   锁是跨线程兜底，无嵌套锁（feedback→save 顺序取锁，不成环）。
+2. **兜底通道与去重的交互**：兜底候选按 seq 跳过词面已命中观测（不重复进池）；
+   与 Q→A 打包文本的重复交给原有文本级去重（保序、先高分者留）——单测 ⑦
+   断言 ref_obs 两两不同。
+3. **reliability 持久化并发/中断**：tmp+rename 原子换文件，中断最多留 .tmp
+   残骸、旧表完好；rename 失败退化为直写。内存态（root 空）不写盘。
+4. **P0 断言是否被兜底意外改变**：排序键加 tier 主键后，无兜底候选时全序等价
+   于 P0 的 (score desc, seq asc)；test_index_rebuild 的逐比特断言
+   （drop+rebuild 前后 recall 逐字段一致）与零副作用断言（replay dump 逐比特）
+   原样全绿；sample50 上兜底 0 触发，行为与 P0 一致。
+5. **bench 双 pass 缓存污染**：pass2 只调 recall，代码路径零 LLM client 触碰；
+   且 pass1 的答题/判分 prompt 与 compare 共用磁盘缓存，pass2 无任何新 prompt。
+   实验前脚本清空 fb-exp 分片目录（shutil.rmtree），防重复摄入污染 pass2 的
+   replay。
+6. **G1 对既有调用方的影响**：rememberFact 新增"槽位须先 declare"后，存量
+   单测 4 处调用点已补 declare 适配（语义即设计 §7：开槽是 declare 的动词）；
+   bench/迁移路径只用 remember（观测层），不受影响。
+
+## P2.6 耗时（时间盒 ≤60min）
+
+| 阶段 | 实测 |
+|---|---|
+| ctest 20/20 | 10.3s |
+| 基线模式全套（4 配置 × 2 后端） | <10s |
+| LLM 模式全套 | 本轮无完整健康计时（API 故障窗口）；P0 同口径 173s；健康缓存热 run sample50 双端合计 <20s（日志 llm api/cache 行） |
+| 双 pass 反馈实验（sample50） | 6.3min（pass1 全缓存；含 lmem 落盘+replay） |
+
+**环境记录（不粉饰）**：验收期间 DeepSeek API 出现约 50 分钟 503/120s 超时
+故障，三个 lmem 小夹具的首轮 judge 跑分全部 transport 失败（answers 回退
+baseline、judge 空响应计 no）——非引擎退化，已在日志留痕
+（`curl: (28) Operation timed out`）。按时间盒纪律停线不无限重试；硬目标
+判定不依赖小夹具 judge（见 P2.3 环境记录¹），恢复后一条命令即可补测。
+
+## P2.7 复跑命令（D6）
+
+```bash
+export PATH="$(dirname $(which g++)):$PATH"
+cmake --build build-win -j8 && (cd build-win && ctest --output-on-failure)   # 20/20
+export AME_MINGW_BIN="$(dirname $(which g++))"
+python bench/scripts/bench_compare_sample.py            # 基线口径 → runs/lmem_p0/
+python bench/scripts/bench_compare_sample.py --llm      # judge 口径（走 bench/cache）
+python bench/scripts/bench_feedback_exp.py --quick      # P2b 双 pass（→ runs/lmem_p2/）
+```
+
+## P2.8 改动文件清单
+
+2.0 侧：
+- `memview/include/ame/memview/memview.h` / `memview/src/memview.cpp`：
+  ReliabilityTable（P2b）、EvidenceItem.via、tier 排序、兜底候选池（P2a）、
+  打分读可靠性表。
+- `mem/include/ame/mem/mem.h` / `mem/src/mem.cpp`：feedback + reliability.json
+  持久化（tmp+rename）、G1–G3 校验门、root_ 成员。
+- `memfact/include/ame/memfact/memfact.h` / `memfact/src/memfact.cpp`：
+  `has_slot`（G1 判定）。
+- `android/ame_jni/mem_jni.cpp`：nativeMemDeclare。
+- `android/app/src/main/java/com/ame/memory/LmemEngine.java`：declare 暴露。
+
+bench 侧：
+- `bench/include/ame/bench/store.h` / `bench/src/store.cpp`：StoreEvidence 增
+  ref_obs/source_kind/via；now 兜底改观测层扫描（持久化恢复后口径一致）；
+  `[fallback]` 触发计数（stderr）。
+- `bench/cli/main.cpp`：`--fb-exp` 双 pass 块（feedback→落盘→pass2 只召回→
+  rank 对比 + ndjson fb_rank 字段）、dump 证据上限 10→30、1.x 反馈/M14 守卫
+  加 store=="graph"。
+- `bench/scripts/bench_feedback_exp.py`（新）：双 pass 实验脚本。
+- `tests/test_lstore.cpp`：⑦兜底召回（零重叠返回 fallback 证据且 user 优先/
+  新鲜度排序、正常路径无 fallback、部分命中时 fallback 居正常候选之后、ref_obs
+  不重复）⑧可靠性闭环（负反馈 rank 降/正反馈 rank 升/封底封顶/reliability.json
+  落盘/重启保留）⑨G1–G3 门（declare 权威 latest、allocate 先开槽、attr/value
+  长度硬校验含 64/256 边界、public 拦截）；4 处存量 rememberFact 补 declare
+  （G1 适配）。合计 138→223 断言（+85）。
+
+产物：`bench/runs/lmem_p2/`（feedback_rank_report.md、fbexp_data/ 分片、日志）。
+
+## P2.9 遗留与下一步
+
+1. fold 三序裁决的 reality 级可靠性仍为静态表（任务口径外，feedback 目前只
+   作用于视图层打分）——多来源（提取器/LLM 插件）接入后需打通 fold 路径。
+2. 单一 kind 数据集上 kind 级反馈天然无排序差（P2.4 归因）；P2 设计中的
+   "LLM 提取插件"上线后来源 kind 多样化，反馈闭环的排序效应才可在 bench 观测。
+3. App 侧 LmemEngine.declare 接线（声明入口 UI/orchestrator 调用点）。

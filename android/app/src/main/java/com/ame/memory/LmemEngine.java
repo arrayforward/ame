@@ -36,6 +36,9 @@ public final class LmemEngine implements MemEngine {
 
     private static native String nativeProfile(long handle);
 
+    private static native int nativeMemDeclare(
+            long handle, String entity, String attrsJson, long ts);
+
     private static native String nativeStats(long handle);
 
     private static native int nativeEraseChannel(long handle, String channel);
@@ -70,6 +73,16 @@ public final class LmemEngine implements MemEngine {
     @Override
     public String getProfile() {
         return nativeProfile(handle);
+    }
+
+    /**
+     * 显式声明槽位属性（P2c declare 原语；权威 Declared facts，可被新声明撤销）。
+     * attrsJson 为 JSON 对象字符串，如 {"身份":"游客0427"}；返回 0=Ok。
+     * 校验门 G1–G3 在网关写入路径（attr≤64 字、value≤256 字、public 域拦截）。
+     * App 侧接线留待后续版本调用。
+     */
+    public int declare(String entity, String attrsJson, long ts) {
+        return nativeMemDeclare(handle, entity, attrsJson, ts);
     }
 
     /** 引擎统计 JSON {turns,total_chars,events,nodes}（状态栏数据通路） */

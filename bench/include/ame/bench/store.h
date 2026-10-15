@@ -27,6 +27,10 @@ struct StoreEvidence {
   std::string dia_id;    // 证据 dia_id（graph 取自事件 attrs，lmem 取自观测 meta；无则空）
   int64_t ts = 0;        // 证据时刻
   double score = 0;      // 后端打分（口径不同，仅供观察，不进指标）
+  // ---- 以下 lmem 专用：P2b 反馈闭环经 ref_obs+source_kind+via 定位证据来源 kind ----
+  uint64_t ref_obs = 0;          // EvidenceItem.ref_obs（graph 恒 0）
+  std::string source_kind;       // 证据来源 kind（user/assistant/… 或 declared/observed/derived）
+  std::string via;               // 来源通道：lex|fallback|fact（P2a 兜底标记）
 };
 
 // 一题取证结果：metrics 口径 + 逐条证据

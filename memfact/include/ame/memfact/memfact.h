@@ -109,6 +109,8 @@ class FactStore {
 
   uint64_t next_seq() const { return next_seq_; }
   size_t owner_count(const std::string& owner) const;
+  // G1 校验门用：owner 下该 entity 槽位是否已有 fact（declare/直写创建过）
+  bool has_slot(const std::string& owner, const std::string& entity) const;
 
  private:
   std::string shard_dir() const;

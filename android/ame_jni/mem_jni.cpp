@@ -153,6 +153,36 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_LmemEngine_nativeProfile(JNIEnv* e
   return ame_jni::jstr(env, c->mem->profile(c->owner, (int64_t)std::time(nullptr)).dump());
 }
 
+// nativeMemDeclare：显式声明槽位属性（P2c declare 原语；G1–G3 校验门在网关写入路径）。
+// attrsJson 为 JSON 对象字符串 {"attr":"value",...}；返回 Err 码（0=Ok，整批原子校验）。
+JNIEXPORT jint JNICALL Java_com_ame_memory_LmemEngine_nativeMemDeclare(JNIEnv* env, jclass,
+                                                                       jlong h, jstring entity,
+                                                                       jstring attrs_json,
+                                                                       jlong ts) {
+  auto c = get_mem(h);
+  if (!c) return -1;
+  std::lock_guard<std::mutex> lk(c->mu);
+  const std::string ent = ame_jni::j2s(env, entity);
+  bool ok = false;
+  const ame::Json j = ame::Json::parse(ame_jni::j2s(env, attrs_json), &ok);
+  if (!ok || j.kind != ame::Json::Obj) {
+    LOGE("memDeclare(%s) attrs 非 JSON 对象", ent.c_str());
+    return (jint)ame::Err::ParseError;
+  }
+  std::map<std::string, std::string> attrs;
+  for (auto& [k, v] : j.obj) {
+    if (v.kind != ame::Json::Str) {
+      LOGE("memDeclare(%s) attr %s 非字符串值", ent.c_str(), k.c_str());
+      return (jint)ame::Err::InvalidArg;
+    }
+    attrs[k] = v.as_str();
+  }
+  const ame::Err rc = c->mem->declare(c->owner, ent, attrs, (int64_t)ts);
+  if (rc != ame::Err::Ok)
+    LOGE("memDeclare(%s) 失败 code=%d", ent.c_str(), (int)rc);
+  return (jint)rc;
+}
+
 // nativeStats 伪代码：观测层统计 → JSON {turns,total_chars,events,nodes}
 //（与 1.x 状态栏数据通路同构：turns=观测数，total_chars=观测文本字符合计，
 //   events=观测数，nodes=事实槽位数——profile fold 的 entity→attr 叶数）。

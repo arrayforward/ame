@@ -6,6 +6,10 @@
  *   ④ 索引可重建：drop+rebuild 后 recall/profile 逐字段/逐比特一致
  *   ⑤ 视图打包：Q→A "→ " 打包；synthesize 零副作用（replay 逐比特一致）
  *   ⑥ 公共域隔离：owner A 抹除后 B 与 public 的 recall/profile 不变
+ *   ⑦ P2a 兜底召回：零词面重叠 → fallback 证据（user 优先+新鲜度）；
+ *     正常路径无 fallback 且排序不变；部分命中时 fallback 恒居正常候选之后
+ *   ⑧ P2b 可靠性闭环：负反馈 rank 降/正反馈 rank 升；reliability.json 重启保留
+ *   ⑨ P2c G1–G3 校验门：declare 权威、allocate 先开槽、长度硬校验、public 拦截
  */
 #include "ame/mem/mem.h"
 #include "test_util.hpp"
@@ -37,6 +41,14 @@ static std::string read_file(const std::string& path) {
   return ss.str();
 }
 
+// UTF-8 码点计数（与网关 G2 校验同口径）
+static size_t utf8_check(const std::string& s) {
+  size_t n = 0;
+  for (unsigned char c : s)
+    if ((c & 0xC0) != 0x80) ++n;
+  return n;
+}
+
 // 观测层 replay 全量 dump（零副作用验证用：逐比特一致的判据）
 static std::string dump_obs(const ObsStore& s) {
   std::string out;
@@ -60,6 +72,7 @@ static void test_erase_semantics() {
     Mem m(root);
     m.remember("u1", "c1", "user", secret, 1700000000);
     m.remember("u1", "c2", "user", "u1 的第二个会话", 1700000100);
+    m.declare("u1", "u1:self", {{"预备槽", "开"}}, 1700000000);  // P2c G1：先开槽
     m.rememberFact("u1", "u1:self", "口令", secret, 1700000000);
     CHECK(std::filesystem::exists(root + "/shards/obs/u1.jsonl"));
     CHECK(std::filesystem::exists(root + "/shards/fact/u1.jsonl"));
@@ -254,6 +267,7 @@ static void test_index_rebuild() {
   }
   m.remember("u1", "c1", "user", "袋子 上 写 了 什么", 1700005000);
   m.remember("u1", "c1", "assistant", "袋子 上 写 着 龙井", 1700005060);
+  m.declare("u1", "u1:self", {{"预备槽", "开"}}, 1700005080);  // P2c G1：先开槽
   m.rememberFact("u1", "u1:self", "喜欢的茶", "龙井", 1700005100);
   m.declare("u1", "u1:self", {{"身份", "游客0427"}, {"常去", "西湖"}}, 1700005200);
 
@@ -339,8 +353,10 @@ static void test_public_domain_isolation() {
   const std::string root = temp_root("ame_lstore_isolation");
   Mem m(root);
   m.remember("A", "c1", "user", "A 的私人行程 隐si", 1700000000);
+  m.declare("A", "A:self", {{"预备槽", "开"}}, 1700000000);  // P2c G1：先开槽
   m.rememberFact("A", "A:self", "爱好", "集邮", 1700000000);
   m.remember("B", "c1", "user", "B 喜欢 西湖 和 龙井", 1700000100);
+  m.declare("B", "B:self", {{"预备槽", "开"}}, 1700000100);  // P2c G1：先开槽
   m.rememberFact("B", "B:self", "爱好", "摄影", 1700000100);
   m.remember("public", "pub", "note", "公共 导览 方案 v1", 1700000200);
   m.declare("public", "public:景点X", {{"开放时间", "8:00-17:00"}}, 1700000200);
@@ -375,6 +391,153 @@ static void test_public_domain_isolation() {
   CHECK(std::filesystem::exists(root + "/shards/fact/public.jsonl"));
 }
 
+// ---------------- ⑦ P2a 兜底召回通道 ----------------
+
+static void test_fallback_recall() {
+  Mem m;  // 内存态
+  const int64_t T = 1700000000;
+  m.remember("u1", "c1", "user", "我喜欢在雨天读科幻小说", T);
+  m.remember("u1", "c1", "assistant", "科幻是个好东西", T + 60);
+  m.remember("u1", "c1", "user", "周末去爬山拍照", T + 120);
+  m.remember("u1", "c1", "assistant", "山上风景特别好", T + 180);
+
+  // 零词面重叠查询（P0 头号缺陷）：不再零证据弃答，返回兜底证据且带 fallback 标记
+  const auto r = m.recall("quantum physics trivia", "u1", 5, T + 1000);
+  CHECK(!r.empty());
+  for (const auto& e : r) CHECK(e.via == "fallback");
+  CHECK(r[0].ref_obs != 0);
+  const Observation* o0 = m.obs(r[0].ref_obs);
+  CHECK(o0 != nullptr);
+  CHECK(o0->kind == "user");          // speaker=user 优先
+  CHECK(o0->ts == T + 120);           // 同优先级 ts 新鲜在前
+
+  // 正常查询路径行为不变：命中 ≥ k/2 时不启用兜底，通道为 lex/fact
+  const auto r2 = m.recall("科幻", "u1", 5, T + 1000);
+  CHECK(!r2.empty());
+  bool has_lex = false;
+  for (const auto& e : r2) {
+    CHECK(e.via != "fallback");
+    if (e.via == "lex") has_lex = true;
+  }
+  CHECK(has_lex);
+
+  // 部分命中（0 < 命中 < k/2）：兜底只作尾部补足——首个 fallback 排全部 lex 证据之后
+  const auto r3 = m.recall("爬山", "u1", 6, T + 1000);  // 仅 1 条词面命中 < 3
+  CHECK(!r3.empty());
+  size_t first_fb = r3.size(), last_lex = 0;
+  bool seen_fb = false, seen_lex = false;
+  for (size_t i = 0; i < r3.size(); ++i) {
+    if (r3[i].via == "fallback") { if (!seen_fb) first_fb = i; seen_fb = true; }
+    if (r3[i].via == "lex") { last_lex = i; seen_lex = true; }
+  }
+  CHECK(seen_lex && seen_fb);
+  CHECK(last_lex < first_fb);  // 不与正常召回混排竞争
+
+  // 兜底证据同文本去重：词面已命中的观测不以兜底身份重复出现（seq 级跳过）
+  for (size_t i = 0; i < r3.size(); ++i)
+    for (size_t j = i + 1; j < r3.size(); ++j)
+      CHECK(r3[i].ref_obs != r3[j].ref_obs);
+}
+
+// ---------------- ⑧ P2b 来源可靠性闭环 ----------------
+
+static void test_feedback_reliability() {
+  const std::string root = temp_root("ame_lstore_feedback");
+  const int64_t T = 1700000000;
+  std::vector<uint64_t> user_seqs, asst_seqs;
+  auto mk_ev = [&](uint64_t seq) {
+    EvidenceItem ev;
+    ev.ref_obs = seq;
+    ev.via = "fallback";
+    ev.source_kind = "user";  // 以观测实际 kind 为准（feedback 内解析）
+    return ev;
+  };
+  auto rank_of = [&](Mem& mm, const std::string& q, uint64_t seq) -> int {
+    const auto r = mm.recall(q, "u1", 10, T + 10000);
+    for (size_t i = 0; i < r.size(); ++i)
+      if (r[i].ref_obs == seq) return (int)i + 1;
+    return 0;
+  };
+  const std::string q = "completely unrelated zymurgy question";
+  {
+    Mem m(root);
+    for (int i = 0; i < 5; ++i) {
+      auto ru = m.remember("u1", "c1", "user", "用户陈述 甲" + std::to_string(i), T + i * 120);
+      auto ra = m.remember("u1", "c1", "assistant", "助手回复 乙" + std::to_string(i),
+                           T + i * 120 + 60);
+      user_seqs.push_back(ru.value.seq);
+      asst_seqs.push_back(ra.value.seq);
+    }
+    // 零重叠 → 全兜底；初始可靠性 user 1.0 > assistant 0.7：最新 user 排第一
+    CHECK(rank_of(m, q, user_seqs[4]) == 1);
+    CHECK(rank_of(m, q, asst_seqs[4]) == 6);
+
+    // 负反馈（同 1.x 罚>奖语义，−0.05/次）：user 证据 rank 下降，assistant 相对上升
+    for (int i = 0; i < 7; ++i) CHECK(m.feedback("u1", mk_ev(user_seqs[4]), false) == Err::Ok);
+    CHECK(rank_of(m, q, user_seqs[4]) == 6);   // 下降
+    CHECK(rank_of(m, q, asst_seqs[4]) == 1);   // 相对上升
+
+    // 正反馈（+0.02/次）：该来源证据 rank 回升
+    for (int i = 0; i < 4; ++i) CHECK(m.feedback("u1", mk_ev(user_seqs[4]), true) == Err::Ok);
+    CHECK(rank_of(m, q, user_seqs[4]) == 1);   // 0.65+0.08=0.73 > 0.70
+
+    // 可靠性表当前值核查（封底 0.05 / 封顶 1.0 内）
+    CHECK(m.reliability().get("user") > m.reliability().get("assistant"));
+    // 持久化文件已落盘
+    CHECK(std::filesystem::exists(root + "/shards/reliability.json"));
+  }
+  // 重启保留：新 Mem 从分片恢复，排序与反馈后一致
+  {
+    Mem m2(root);
+    CHECK(rank_of(m2, q, user_seqs[4]) == 1);
+    CHECK(rank_of(m2, q, asst_seqs[4]) == 6);
+    CHECK(m2.reliability().get("user") > m2.reliability().get("assistant"));
+  }
+}
+
+// ---------------- ⑨ P2c declare 原语 + G1–G3 校验门 ----------------
+
+static void test_declare_gates() {
+  Mem m;  // 内存态
+  const int64_t T = 1700000000;
+
+  // declare 创建槽位 → latest 取 declared 权威值
+  CHECK(m.declare("u1", "u1:self", {{"身份", "游客0427"}}, T) == Err::Ok);
+  Folded fd;
+  CHECK(m.fact_store().latest("u1", "u1:self", "身份", T + 100, fd));
+  CHECK(fd.fact.value == "游客0427");
+  CHECK(fd.fact.reality == Reality::Declared);
+
+  // G1：槽位不存在 → rememberFact（allocate）拒绝；declare 创建后放行
+  CHECK(m.rememberFact("u1", "u1:newslot", "x", "y", T).code == Err::InvalidArg);
+  CHECK(m.declare("u1", "u1:newslot", {{"开启", "1"}}, T) == Err::Ok);
+  CHECK(m.rememberFact("u1", "u1:newslot", "x", "y", T).code == Err::Ok);
+
+  // G2：attr 空 / attr>64 字 / value>256 字 → 拒绝且不写入
+  const size_t fc0 = m.fact_store().owner_count("u1");
+  CHECK(m.declare("u1", "u1:self", {{"", "v"}}, T) == Err::InvalidArg);
+  CHECK(m.declare("u1", "u1:self", {{std::string(65, 'a'), "v"}}, T) == Err::InvalidArg);
+  CHECK(m.declare("u1", "u1:self", {{"ok", std::string(257, 'b')}}, T) == Err::InvalidArg);
+  CHECK(m.rememberFact("u1", "u1:self", std::string(65, 'c'), "v", T).code == Err::InvalidArg);
+  CHECK(m.rememberFact("u1", "u1:self", "ok", std::string(257, 'd'), T).code == Err::InvalidArg);
+  CHECK(m.fact_store().owner_count("u1") == fc0);  // 全部未写入
+  // 边界：64 字 attr / 256 字 value（CJK 按码点计）刚好放行
+  const std::string cjk_cha = "\xE8\x8C\xB6";  // "茶"
+  std::string attr64, val256;
+  for (int i = 0; i < 64; ++i) attr64 += cjk_cha;
+  for (int i = 0; i < 256; ++i) val256 += cjk_cha;
+  CHECK(utf8_check(attr64) == 64 && utf8_check(val256) == 256);  // 辅助断言防拼错
+  CHECK(m.declare("u1", "u1:self", {{attr64, val256}}, T) == Err::Ok);
+
+  // G3：个人域写 public 槽位拦截（declare 与 rememberFact 同拦）；public owner 放行
+  CHECK(m.declare("u1", "public:景点X", {{"开放时间", "8:00"}}, T) == Err::InvalidArg);
+  CHECK(m.rememberFact("u1", "public:景点X", "a", "b", T).code == Err::InvalidArg);
+  CHECK(m.declare("public", "public:景点X", {{"开放时间", "8:00"}}, T) == Err::Ok);
+  Folded fd2;
+  CHECK(m.fact_store().latest("public", "public:景点X", "开放时间", T + 100, fd2));
+  CHECK(fd2.fact.value == "8:00");
+}
+
 int main() {
   test_erase_semantics();
   test_fold_arbitration();
@@ -382,5 +545,8 @@ int main() {
   test_index_rebuild();
   test_view_packaging_and_no_side_effect();
   test_public_domain_isolation();
+  test_fallback_recall();
+  test_feedback_reliability();
+  test_declare_gates();
   return AME_TEST_REPORT();
 }
