@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider 共享路径：拍照产物与压缩图存 filesDir/images/ -->
+<!-- FileProvider 共享路径：拍照临时落点用 cacheDir（拍完即删，图片不落盘）；
+     sessions 供 1.x 时代快照等场景（2.0 分片在 sessions/<id>/lmem/ 下，同属 files-path） -->
 <paths>
+    <cache-path name="camera" path="/" />
     <files-path name="images" path="images/" />
     <files-path name="sessions" path="sessions/" />
 </paths>
