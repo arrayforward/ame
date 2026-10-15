@@ -550,15 +550,30 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
   // 证据终排：对 recall 大候选池（k_pool，未提前截断）+ think 并入证据，统一按问题
   // 内容词 BM25-lite 精确命中重排（stable，同分保持原序）后才截 top-k——融合排序的
   // 能量/时近偏置只决定候选资格，不允许盖过词面精确命中。
+  // L2 终排混合（--final-alpha/--final-beta 开启）：排序键从纯内容分改为
+  //   final = α·BM25内容分 + β·minmax_norm(1.x 融合分)
+  // 归一在本题候选集内 min-max（每题独立，无跨 case 泄漏）；默认关闭 = 历史行为。
   double top_content = 0.0;  // 终排后榜首的内容词得分（弃答门控用）
   if (evs.size() > 1) {
     std::vector<const Node*> nodes;
     for (auto* se : evs) nodes.push_back(se->event);
     std::vector<double> cs = content_scores(q.question, nodes);
+    std::vector<double> key = cs;  // 排序键：默认即内容分
+    if (cfg.final_mix) {
+      double mn = evs.front()->score, mx = mn;
+      for (auto* se : evs) {
+        mn = std::min(mn, se->score);
+        mx = std::max(mx, se->score);
+      }
+      for (size_t i = 0; i < evs.size(); ++i) {
+        double norm = mx > mn ? (evs[i]->score - mn) / (mx - mn) : 0.0;
+        key[i] = cfg.final_alpha * cs[i] + cfg.final_beta * norm;
+      }
+    }
     std::vector<size_t> ord(evs.size());
     for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
     std::stable_sort(ord.begin(), ord.end(),
-                     [&](size_t a, size_t b) { return cs[a] > cs[b]; });
+                     [&](size_t a, size_t b) { return key[a] > key[b]; });
     std::vector<const ScoredEvent*> reranked;
     for (size_t i : ord) reranked.push_back(evs[i]);
     evs = std::move(reranked);

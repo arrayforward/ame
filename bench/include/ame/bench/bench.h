@@ -70,6 +70,15 @@ struct BenchConfig {
   int agg_prefilter_n = 20;            // 聚合题本地预过滤保留名额（BM25-lite 排序截断）
   int agg_batch = 5;                   // 批量提取：每次喂入的证据条数
 
+  // ---- L2 终排混合（语义 graph 激活工程）----
+  // 开启后 answer() 证据终排从纯 BM25-lite 内容分改为混合：
+  //   final = α·BM25内容分 + β·minmax_norm(1.x 融合分)
+  // 仅在显式传 --final-alpha/--final-beta 时开启（默认关闭=历史纯 BM25 行为，
+  // 保证 L1（词激活）与 L1+L2（混合终排）可逐级 A/B 不互相污染）。
+  bool final_mix = false;              // --final-alpha/--final-beta 任一传入即开启
+  double final_alpha = 0.6;            // BM25 内容分权重（默认 0.6）
+  double final_beta = 0.4;             // 1.x 融合分权重（默认 0.4）
+
   // ---- LLM 管线配置（任务二）----
   std::string extractor_mode = "rule";    // rule|llm（llm 按会话批量提取）
   std::string answer_mode = "baseline";   // baseline|llm

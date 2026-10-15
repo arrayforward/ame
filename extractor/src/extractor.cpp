@@ -151,8 +151,13 @@ Extraction RuleExtractor::extract(const std::string& text) {
   }
 
   // ---- 关键词：AC 自动机一遍扫描（load_keyword_dict 加载的大词表）----
+  // 大小写不敏感：对 ASCII 小写副本扫描（词表存小写；中文码点不受 tolower 影响）。
+  // 输出词条为词表词（小写），M3 normalize 同为小写语义，写入/查询两侧一致。
   if (ac_built_) {
-    for (auto& [pos, w, cat] : ac_match(text)) {
+    std::string scan_text = text;
+    for (auto& ch : scan_text)
+      if ((unsigned char)ch < 128 && ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+    for (auto& [pos, w, cat] : ac_match(scan_text)) {
       (void)pos;
       bool covered = false;
       for (auto& e : ex.entities)

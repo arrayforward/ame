@@ -53,8 +53,11 @@ struct Cli {
   std::string feedback_dir;    // --feedback-dir PATH：M11 埋点+judge 信号回流 + M14 调优对比
   std::string fb_exp;          // --fb-exp DIR：P2b 双 pass 反馈实验（仅 --store lmem；
                                // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
+  std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
+                               // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
+  bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
   int prox_window = 2;         // --prox-window N：lmem P3b 邻近加成窗口（0=禁用，默认 2）
   bool expand_on = true;       // --no-expand：lmem P3b 共现联想扩散关闭
 };
@@ -100,6 +103,15 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--load-graph") cli.load_graph = next();
     else if (a == "--feedback-dir") cli.feedback_dir = next();
     else if (a == "--fb-exp") cli.fb_exp = next();
+    else if (a == "--extractor-dict") cli.extractor_dict = next();
+    else if (a == "--final-alpha") {
+      cli.cfg.final_alpha = std::atof(next().c_str());
+      cli.has_final = cli.cfg.final_mix = true;
+    }
+    else if (a == "--final-beta") {
+      cli.cfg.final_beta = std::atof(next().c_str());
+      cli.has_final = cli.cfg.final_mix = true;
+    }
     else if (a == "--prox-window") cli.prox_window = std::atoi(next().c_str());
     else if (a == "--no-expand") cli.expand_on = false;
     else if (a == "--weights") {  // α,β,γ 覆盖（M14 调优结果验证用）
@@ -134,6 +146,8 @@ void usage() {
                "      [--cand-dump cands.ndjson]（仅 lmem：候选池全量落盘，P3a miss 诊断用）\n"
                "      [--fb-exp DIR]（仅 lmem：P2b 双 pass 反馈实验，pass1 判分→feedback 落盘\n"
                "       →pass2 同题单只跑召回对比金标证据排序）\n"
+               "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
+               "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
 
@@ -206,6 +220,8 @@ int main(int argc, char** argv) {
     mark("save-graph", !cli.save_graph.empty());
     mark("load-graph", !cli.load_graph.empty());
     mark("load-lexicon", !cli.load_lexicon.empty());
+    mark("extractor-dict", !cli.extractor_dict.empty());
+    mark("final-alpha/beta", cli.has_final);
     mark("feedback-dir", !cli.feedback_dir.empty());
     mark("beam", cli.cfg.beam_width > 0);
     mark("think-mode=ircot", cli.cfg.think_mode == "ircot");
@@ -442,6 +458,21 @@ int main(int argc, char** argv) {
         if (comma == std::string::npos) break;
         p = comma + 1;
       }
+    }
+
+    // --extractor-dict：L1 查询侧词激活——摄入完成后、答题前把大词表加载进 M1 提取器
+    // （AC 缓存 <file>.ac 同目录；缓存命中直接加载，首 case 构建后覆写缓存）。
+    // 加载后 gen_seeds 的自由文本通道（extractor_->extract(query)）与 CJK 词法通道
+    // 才能从大词表产出关键词/中文词，经 M3 normalize 命中图上关键词节点 → 语义 graph 入口。
+    if (!cli.extractor_dict.empty()) {
+      int n = e.extractor().load_keyword_dict_cached(cli.extractor_dict, "seg", 700000,
+                                                     cli.extractor_dict + ".ac");
+      if (n < 0)
+        std::fprintf(stderr, "[warn] extractor-dict 加载失败（%s），按未加载继续\n",
+                     cli.extractor_dict.c_str());
+      else
+        std::fprintf(stderr, "[extractor-dict] case %s 加载 %d 条（%s）\n",
+                     c.conversation_id.c_str(), n, cli.extractor_dict.c_str());
     }
 
     for (auto& q : c.questions) {
