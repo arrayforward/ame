@@ -813,7 +813,18 @@ int main(int argc, char** argv) {
   std::vector<double> judge_scores(pendings.size(), -1.0);
   std::vector<ChatRequest> judge_reqs;
   if (cli.cfg.judge_mode == "llm" && llm_judge) {
-    for (auto& p : pendings) {
+    // 对抗题口径修正（answer_quality 专项）：数据集标注不可答且参考答案为空时，
+    // yes/no 对照退化为掷硬币（实测 10 题空参考蒙对 4 题），改为规则口径——
+    // 弃答（unanswerable/NO INFORMATION）=1 分、硬答=0 分，不消耗 LLM 判分。
+    std::vector<size_t> jidx;
+    for (size_t i = 0; i < pendings.size(); ++i) {
+      auto& p = pendings[i];
+      if (p.q->unanswerable && p.q->answer.empty()) {
+        const bool abst =
+            p.llm_done ? LlmAnswerer::is_abstain(p.llm_answer) : p.base.abstained;
+        judge_scores[i] = abst ? 1.0 : 0.0;
+        continue;
+      }
       std::string pred = p.llm_done ? p.llm_answer : p.base.answer_text;
       judge_reqs.push_back(
           {{{"system", "你是答案评审，只输出 yes 或 no。"},
@@ -821,11 +832,12 @@ int main(int argc, char** argv) {
                          "\n模型回答: " + pred +
                          "\n模型回答是否与参考答案语义一致（允许措辞不同）？只回答 yes 或 no。"}},
            {0.0, 512, false}});  // 推理模型：max_tokens 含思考预算
+      jidx.push_back(i);
     }
     std::fprintf(stderr, "[llm] 判分批量 %zu 题...\n", judge_reqs.size());
     auto jresps = client->chat_batch(judge_reqs, cli.cfg.concurrency);
-    for (size_t i = 0; i < pendings.size(); ++i)
-      judge_scores[i] = LlmJudge::parse_yes_no(jresps[i]) ? 1.0 : 0.0;
+    for (size_t k = 0; k < jidx.size(); ++k)
+      judge_scores[jidx[k]] = LlmJudge::parse_yes_no(jresps[k]) ? 1.0 : 0.0;
   }
   // 汇总最终回答（llm 优先，失败回退 baseline）并累计
   std::vector<AnswerResult> finals(pendings.size());
