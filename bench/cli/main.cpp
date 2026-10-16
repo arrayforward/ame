@@ -813,19 +813,27 @@ int main(int argc, char** argv) {
   std::vector<double> judge_scores(pendings.size(), -1.0);
   std::vector<ChatRequest> judge_reqs;
   if (cli.cfg.judge_mode == "llm" && llm_judge) {
-    // 对抗题口径修正（answer_quality 专项）：数据集标注不可答且参考答案为空时，
-    // yes/no 对照退化为掷硬币（实测 10 题空参考蒙对 4 题），改为规则口径——
-    // 弃答（unanswerable/NO INFORMATION）=1 分、硬答=0 分，不消耗 LLM 判分。
+    // 对抗题口径修正 v2（作答最后一公里轮）：数据集标注不可答且参考答案为空时，
+    // v1 规则（弃答=1/硬答=0）会把"正确指出错误前提"的高质量硬答也判 0（三栏核对
+    // 实测 3/7 属此类）。改为 cat5 专用 LLM rubric：弃答 或 正确指出前提问题/给出
+    // 正确归属 = 合格；照单接受错误前提直答 = 不合格。只作用于 unanswerable 题，
+    // cat1-4 的 yes/no 判分路径不变。
     std::vector<size_t> jidx;
     for (size_t i = 0; i < pendings.size(); ++i) {
       auto& p = pendings[i];
+      std::string pred = p.llm_done ? p.llm_answer : p.base.answer_text;
       if (p.q->unanswerable && p.q->answer.empty()) {
-        const bool abst =
-            p.llm_done ? LlmAnswerer::is_abstain(p.llm_answer) : p.base.abstained;
-        judge_scores[i] = abst ? 1.0 : 0.0;
+        judge_reqs.push_back(
+            {{{"system", "你是答案评审，只输出 yes 或 no。"},
+              {"user", "问题: " + p.q->question + "\n模型回答: " + pred +
+                           "\n该问题可能基于错误前提（人物/归属/事件与对话事实不符）"
+                           "或确实无法回答。模型回答若满足任一：明确指出前提问题并给出正确归属；"
+                           "或明确表示无法回答/信息不足——则合格。照单接受错误前提直接作答则不合格。"
+                           "只回答 yes 或 no。"}},
+             {0.0, 512, false}});
+        jidx.push_back(i);
         continue;
       }
-      std::string pred = p.llm_done ? p.llm_answer : p.base.answer_text;
       judge_reqs.push_back(
           {{{"system", "你是答案评审，只输出 yes 或 no。"},
             {"user", "问题: " + p.q->question + "\n参考答案: " + p.q->answer +
