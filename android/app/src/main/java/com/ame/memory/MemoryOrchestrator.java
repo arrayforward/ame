@@ -5,6 +5,10 @@
  *     滑窗外的历史只从记忆图取证，不做压缩摘要——"外置而非压缩"模式）
  *     + 最近 z 条原文（滑动窗口，窗口内图片轮只带其记忆文本）——先于写入执行，
  *     当前问题不入图、不占证据位；
+ *   步骤A'（可选，deepRerank=true）：recall 池放大到 DEEP_RERANK_POOL 条，交给
+ *     M3 全池语义打分（MiniMaxClient.rerank）精选 DEEP_RERANK_TOP_K 条注入——
+ *     bench llm 冻结配置的端侧移植（sample50 覆盖率 bm25 0.464→llm 0.672），
+ *     App 侧为可控开关试跑档，非默认；失败/解析空表降级为原序 top-k；
  *   步骤B：MiniMax 整段作答（本轮带图则走多模态 content 数组）；
  *   步骤C：一轮一条写入记忆——"提问 → 回答"合成单个事件一次 remember_turn
  *     （图片轮的记忆文本 = "[图片] " + 随图文字，无随图文字时调 M3 vision 生成
@@ -51,6 +55,12 @@ public class MemoryOrchestrator {
     /** 联网搜索结果注入字符上限（截断防超长结果撑爆单轮上下文） */
     public static final int SEARCH_MAX_CHARS = 2000;
 
+    /** 深度重排档：recall 全池大小（语义打分取证的候选量，bench llm 档口径） */
+    public static final int DEEP_RERANK_POOL = 60;
+
+    /** 深度重排档：M3 从全池中精选注入 system prompt 的证据条数 */
+    public static final int DEEP_RERANK_TOP_K = 5;
+
     private final MemEngine engine;
     private final SessionStore store;
     private final String sessionId;
@@ -79,18 +89,20 @@ public class MemoryOrchestrator {
         public final List<MiniMaxClient.Msg> messages;  // 实际提交的 messages（含滑窗）
         public final boolean webSearch;               // 本轮是否开联网
         public final String searchText;               // 第 1 轮联网检索内容；null = 未联网/失败
+        public final boolean deepRerank;              // 本轮是否开深度重排（池 60 → 注入 5）
         public final int sentTokens;
         public final long ts;
 
         TurnDiag(String query, String system, List<String> evidence,
                  List<MiniMaxClient.Msg> messages, boolean webSearch, String searchText,
-                 int sentTokens, long ts) {
+                 boolean deepRerank, int sentTokens, long ts) {
             this.query = query;
             this.system = system;
             this.evidence = evidence;
             this.messages = messages;
             this.webSearch = webSearch;
             this.searchText = searchText;
+            this.deepRerank = deepRerank;
             this.sentTokens = sentTokens;
             this.ts = ts;
         }
@@ -133,7 +145,13 @@ public class MemoryOrchestrator {
 
     /** 一轮问答（纯文本）；返回助手回复文本；全程同步，调用方负责切线程 */
     public String chat(String userText) {
-        return chat(userText, null, null, false);
+        return chat(userText, null, null, false, false);
+    }
+
+    /** 一轮问答（4 参旧签名，等价 deepRerank=false）；返回助手回复文本 */
+    public String chat(String userText, String imageB64, String imagePath,
+                       boolean webSearch) {
+        return chat(userText, imageB64, imagePath, webSearch, false);
     }
 
     /** 一轮问答；返回助手回复文本；全程同步，调用方负责切线程。
@@ -143,13 +161,18 @@ public class MemoryOrchestrator {
      *  webSearch=true 时两轮流程：第一轮 web_search 只查内容（不落记忆），第二轮
      *  M3 本地非联网作答——system prompt 同时携带"联网搜索结果 + recall 记忆证据 +
      *  提问"；只有第二轮的整轮问答写入记忆（一轮一条，失败轮不落）。带图时先用
-     *  M3 vision 解析图片并入搜索查询。搜索失败降级为不联网直接作答。 */
+     *  M3 vision 解析图片并入搜索查询。搜索失败降级为不联网直接作答。
+     *  deepRerank=true（深度重排试跑档）：recall 池放大到 60 条，装配时先经
+     *  MiniMaxClient.rerank 全池语义打分精选 top-5 注入（失败降级原序 top-5），
+     *  注入格式与默认档完全一致；与联网搜索同开时两者作用在 system 的不同段、
+     *  无数据依赖（见 assemble 注释）。 */
     public String chat(String userText, String imageB64, String imagePath,
-                       boolean webSearch) {
+                       boolean webSearch, boolean deepRerank) {
         long now = System.currentTimeMillis() / 1000;
         List<Message> history = store.loadMessages(sessionId);
         Log.d(TAG, "[" + sessionId + "] chat 开始: user=" + take(userText, 80)
                 + " 带图=" + (imagePath != null) + " 联网=" + webSearch
+                + " 重排=" + deepRerank
                 + " history=" + history.size() + "条");
 
         // 图片轮的记忆文本 = "[图片] " + 随图文字，无随图文字时调 M3 vision 生成
@@ -187,10 +210,10 @@ public class MemoryOrchestrator {
             }
         }
 
-        // 装配（含 recall 取证 + 联网搜索结果注入）——当前问题不入图，也不占证据位
+        // 装配（含 recall 取证 [+可选深度重排] + 联网搜索结果注入）——当前问题不入图，也不占证据位
         String query = userText.trim().isEmpty() ? memoryText : userText;   // ifBlank
         List<MiniMaxClient.Msg> msgs = assemble(query, history, userText, imageB64,
-                webSearch, searchText);
+                webSearch, searchText, deepRerank);
 
         // 第 2 轮：M3 本地非联网作答（搜索结果+提问+记忆均在 system/窗口中）
         String reply = MiniMaxClient.chat(msgs);
@@ -215,17 +238,29 @@ public class MemoryOrchestrator {
     // assemble 伪代码：system（人设+档案+recall 证据[+联网搜索结果]）+ 滑窗轮次
     //   （图片轮只带记忆文本）+ 当前用户轮（带图则多模态）；同时估算本轮发送 token
     //   并记录 lastSentTokens。顺带产出 TurnDiag 快照供诊断 tab。
+    // 证据装配顺序：recall(query, limit) → [deepRerank 时全池语义重排] → 证据列表
+    //   传入 buildSystemPrompt 注入 → 联网搜索结果追加在证据段之后。
+    //   与 webSearch 同开的顺序说明（规格选定"搜索注入后整体重排"的等价实现）：
+    //   重排只作用于记忆证据列表、搜索文本只追加在 system 末尾，两者数据无依赖，
+    //   先重排后追加与先追加后重排产出的最终 system 完全相同（证据段序 + 搜索段位置
+    //   均不变），故按数据流自然顺序实现，最终 prompt 布局 = 重排后证据段 → 搜索段。
     private List<MiniMaxClient.Msg> assemble(String query, List<Message> history,
                                              String userText, String imageB64,
-                                             boolean webSearch, String searchText) {
+                                             boolean webSearch, String searchText,
+                                             boolean deepRerank) {
         // takeLast(windowSize)：取历史末尾至多 windowSize 条
         int from = Math.max(0, history.size() - windowSize);
         List<Message> window = history.subList(from, history.size());
         Set<String> windowTexts = new HashSet<>();
         for (Message m : window) windowTexts.add(m.text);
+
+        // recall 取证（deepRerank 时池放大到全池）+ [可选] 语义重排 + system 注入
         PromptResult pr;
         try {
-            pr = buildSystemPrompt(query, windowTexts);
+            List<EvidenceItem> items = recallEvidence(query,
+                    deepRerank ? DEEP_RERANK_POOL : recallLimit, windowTexts);
+            if (deepRerank) items = deepRerank(query, items);
+            pr = buildSystemPrompt(items);
         } catch (org.json.JSONException e) {
             // Kotlin 中 JSON 异常非受检、直接外抛；Java 这里包装为 RuntimeException 等价传播
             throw new RuntimeException(e);
@@ -267,21 +302,92 @@ public class MemoryOrchestrator {
         Log.d(TAG, "[" + sessionId + "] 装配完成: system=" + system.length() + "字 "
                 + "滑窗=" + window.size() + "条 messages=" + msgs.size() + "条 "
                 + (searchText != null ? "联网结果=" + searchText.length() + "字 " : "")
+                + (deepRerank ? "深度重排=" + evidence.size() + "条 " : "")
                 + "~" + lastSentTokens + "tok");
         diagLog.addLast(new TurnDiag(query, system, evidence,
-                new ArrayList<>(msgs), webSearch, searchText,
+                new ArrayList<>(msgs), webSearch, searchText, deepRerank,
                 lastSentTokens, System.currentTimeMillis()));
         while (diagLog.size() > DIAG_MAX) diagLog.removeFirst();
         return msgs;
     }
 
+    // recallEvidence：引擎 recall（limit 条，引擎侧已按分数去重）+ 滑窗重叠过滤。
+    //   windowTexts=滑窗原文集合——已在滑窗里的证据直接跳过（否则同一条消息在
+    //   system 证据段和滑窗 messages 里出现两次，浪费 token）；证据内部去重由
+    //   引擎 rerank 在截断前完成，这里不重复做。返回候选条目（text/ts/score）。
+    private List<EvidenceItem> recallEvidence(String query, int limit,
+                                              Set<String> windowTexts)
+            throws org.json.JSONException {
+        List<EvidenceItem> items = new ArrayList<>();
+        int skipped = 0;
+        String recallRaw = engine.recall(query, limit);
+        JSONArray evs = new JSONArray(recallRaw);
+        Log.d(TAG, "[" + sessionId + "] recall查询='" + query + "' -> "
+                + evs.length() + "条去重后证据");
+        for (int i = 0; i < evs.length(); i++) {
+            JSONObject e = evs.getJSONObject(i);
+            String txt = e.getString("text");
+            if (windowTexts.contains(txt)) {   // `in` 集合判断
+                skipped++;
+                Log.d(TAG, "[" + sessionId + "]   证据[" + (i + 1) + "] 跳过（滑窗已含）: "
+                        + take(txt, 60));
+                continue;
+            }
+            items.add(new EvidenceItem(txt, e.getLong("ts"), e.optDouble("score")));
+            Log.d(TAG, "[" + sessionId + "]   证据[" + items.size() + "] score="
+                    + e.optDouble("score") + " " + take(txt, 80));
+        }
+        if (skipped > 0) Log.d(TAG, "[" + sessionId + "] 滑窗重叠过滤 " + skipped + " 条");
+        if (items.isEmpty()) {
+            Log.w(TAG, "[" + sessionId + "] recall 无有效证据（滑窗过滤后为空）——模型本轮收不到记忆");
+        }
+        return items;
+    }
+
+    // deepRerank：全池 LLM 语义重排（bench llm 冻结配置的端侧形态，覆盖率证据
+    //   bm25 0.464→llm 0.672）。拿候选 text 列表调 MiniMaxClient.rerank 选
+    //   top-DEEP_RERANK_TOP_K；候选不足 topK 时全留不重排；rerank 返回空表
+    //   （调用失败/解析无有效编号/模型判 NONE）→ 降级原序 top-k，保证作答轮必有
+    //   证据可注入。
+    private List<EvidenceItem> deepRerank(String query, List<EvidenceItem> items) {
+        if (items.size() <= DEEP_RERANK_TOP_K) {
+            Log.d(TAG, "[" + sessionId + "] 深度重排：候选 " + items.size()
+                    + "≤" + DEEP_RERANK_TOP_K + " 条，全留不重排");
+            return items;
+        }
+        List<String> texts = new ArrayList<>(items.size());
+        for (EvidenceItem it : items) texts.add(it.text);
+        List<Integer> picked;
+        try {
+            picked = MiniMaxClient.rerank(query, texts, DEEP_RERANK_TOP_K);
+        } catch (Exception e) {
+            // rerank 内部已兜底异常→空表；这里再兜一层防回归
+            Log.e(TAG, "[" + sessionId + "] 深度重排异常，降级原序 top-"
+                    + DEEP_RERANK_TOP_K, e);
+            picked = new ArrayList<>();
+        }
+        if (picked.isEmpty()) {
+            Log.d(TAG, "[" + sessionId + "] 深度重排降级：原序 top-" + DEEP_RERANK_TOP_K
+                    + "（池 " + items.size() + " 条）");
+            return new ArrayList<>(items.subList(0, DEEP_RERANK_TOP_K));
+        }
+        List<EvidenceItem> out = new ArrayList<>(picked.size());
+        StringBuilder sel = new StringBuilder();
+        for (int idx : picked) {
+            out.add(items.get(idx));
+            if (sel.length() > 0) sel.append(',');
+            sel.append(idx + 1);
+        }
+        Log.d(TAG, "[" + sessionId + "] 深度重排：池 " + items.size() + " 条 → 选中 "
+                + out.size() + " 条（池内序号: " + sel + "）");
+        return out;
+    }
+
     // buildSystemPrompt 伪代码：人设（对话/导游）+ 导览方案段（导游模式）+
-    //   用户档案槽位 + recall 证据（每条带 [yyyy-MM-dd] 时间戳，供模型做时序推断）；
-    //   证据为空时省略对应段。windowTexts=滑窗原文集合——已在滑窗里的证据直接跳过
-    //   （否则同一条消息在 system 证据段和滑窗 messages 里出现两次，浪费 token）；
-    //   证据内部去重由引擎 rerank 在截断前完成，这里不重复做。
+    //   用户档案槽位 + 证据段（每条带 [yyyy-MM-dd HH:mm] 时间戳，供模型做时序推断，
+    //   recall 与可选重排已在上游完成，本方法只负责注入）；证据为空时省略对应段。
     //   返回 (全文, 实际注入的证据列表)。
-    private PromptResult buildSystemPrompt(String query, Set<String> windowTexts)
+    private PromptResult buildSystemPrompt(List<EvidenceItem> items)
             throws org.json.JSONException {
         StringBuilder sb = new StringBuilder(
                 guideText != null
@@ -314,36 +420,31 @@ public class MemoryOrchestrator {
         }
 
         List<String> evidence = new ArrayList<>();
-        int skipped = 0;
-        // 证据内部去重已在引擎 rerank 完成（截断前贪心，重复文本不占名额）；
-        // 这里只过滤"滑窗已包含"的证据——滑窗是 App 层概念，引擎不可见。
-        String recallRaw = engine.recall(query, recallLimit);
-        JSONArray evs = new JSONArray(recallRaw);
-        Log.d(TAG, "[" + sessionId + "] recall查询='" + query + "' -> "
-                + evs.length() + "条去重后证据");
-        for (int i = 0; i < evs.length(); i++) {
-            JSONObject e = evs.getJSONObject(i);
-            String txt = e.getString("text");
-            if (windowTexts.contains(txt)) {   // `in` 集合判断
-                skipped++;
-                Log.d(TAG, "[" + sessionId + "]   证据[" + (i + 1) + "] 跳过（滑窗已含）: "
-                        + take(txt, 60));
-                continue;
-            }
-            String d = fmt.format(new Date(e.getLong("ts") * 1000));
-            String line = "- [" + d + "] " + txt;
-            evidence.add(line);
-            Log.d(TAG, "[" + sessionId + "]   证据[" + evidence.size() + "] score="
-                    + e.optDouble("score") + " ts=" + d + " " + take(txt, 80));
-        }
-        if (skipped > 0) Log.d(TAG, "[" + sessionId + "] 滑窗重叠过滤 " + skipped + " 条");
-        if (!evidence.isEmpty()) {
+        if (!items.isEmpty()) {
             sb.append("\n\n相关记忆（来自历史对话，可能超出当前上下文窗口）：");
-            for (String line : evidence) sb.append("\n").append(line);
-        } else {
-            Log.w(TAG, "[" + sessionId + "] recall 无有效证据（滑窗过滤后为空）——模型本轮收不到记忆");
+            for (EvidenceItem it : items) {
+                String d = fmt.format(new Date(it.ts * 1000));
+                String line = "- [" + d + "] " + it.text;
+                evidence.add(line);
+                sb.append("\n").append(line);
+                Log.d(TAG, "[" + sessionId + "]   注入证据[" + evidence.size() + "] score="
+                        + it.score + " ts=" + d + " " + take(it.text, 80));
+            }
         }
         return new PromptResult(sb.toString(), evidence);
+    }
+
+    /** 单条候选证据：recall 原始字段持有（重排前不格式化，注入时才打时间戳） */
+    private static final class EvidenceItem {
+        final String text;
+        final long ts;
+        final double score;
+
+        EvidenceItem(String text, long ts, double score) {
+            this.text = text;
+            this.ts = ts;
+            this.score = score;
+        }
     }
 
     /** Kotlin Pair<String, List<String>> 的等价持有类：system 全文 + 证据列表 */

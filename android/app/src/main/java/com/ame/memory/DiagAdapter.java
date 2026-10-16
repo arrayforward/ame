@@ -67,7 +67,8 @@ public class DiagAdapter extends RecyclerView.Adapter<DiagAdapter.VH> {
         h.title.setText("第 " + (pos + 1) + " 轮 · " + fmt.format(new Date(d.ts))
                 + " · 查询：" + take(d.query, 36));
         h.sub.setText("发送 ~" + d.sentTokens + " tok │ 证据 " + d.evidence.size()
-                + " 条 │ 消息 " + d.messages.size() + " 条（含 system）");
+                + " 条 │ 消息 " + d.messages.size() + " 条（含 system）"
+                + (d.deepRerank ? " │ 重排：开(60→5)" : ""));
         h.itemView.setOnClickListener(v -> showDetail(v.getContext(), d, pos + 1));
     }
 
@@ -85,6 +86,7 @@ public class DiagAdapter extends RecyclerView.Adapter<DiagAdapter.VH> {
                 kv("查询词", d.query) + "\n" +
                 kv("时间", fmt.format(new Date(d.ts))) + "\n" +
                 kv("联网搜索", d.webSearch ? "开（第1轮检索→第2轮 M3 综合作答）" : "关") + "\n" +
+                kv("深度重排", d.deepRerank ? "开(60→5)" : "关") + "\n" +
                 kv("发送估算", "~" + d.sentTokens + " tok") + "\n" +
                 kv("记忆证据", d.evidence.size() + " 条") + "\n" +
                 kv("提交消息", d.messages.size() + " 条（含 system）"));

@@ -159,6 +159,59 @@ public final class MiniMaxClient {
         }
     }
 
+    /**
+     * 全池 LLM 语义重排（bench llm 冻结配置的端侧移植；桌面证据：sample50 覆盖率
+     * bm25 0.464 → llm 全池打分 0.672）。一次 chat 调用：prompt 列出编号 1..N 的
+     * 候选（每条截 200 字），让模型选出对回答问题最有用的前 topK 个编号。
+     * 容错降级：调用异常/输出解析失败 → 返回空表，由调用方退回原序 top-k。
+     * 返回选中条目的 0 基下标（≤topK，按模型给出的相关度序）；stripThink 由 chat 内完成。
+     */
+    public static List<Integer> rerank(String query, List<String> candidates, int topK) {
+        if (candidates == null || candidates.isEmpty()) return new ArrayList<>();
+        StringBuilder sb = new StringBuilder(
+                "下面编号 1.." + candidates.size() + " 的条目，选出对回答问题最有用的前 "
+                        + topK + " 个编号，只输出编号逗号分隔，都没有输出 NONE。\n\n问题：")
+                .append(query).append("\n\n");
+        for (int i = 0; i < candidates.size(); i++) {
+            String t = candidates.get(i);
+            sb.append(i + 1).append(". ")
+                    .append(t.length() > 200 ? t.substring(0, 200) : t).append('\n');
+        }
+        String resp;
+        try {
+            resp = chat(java.util.Collections.singletonList(new Msg("user", sb.toString())),
+                    512);   // 输出仅编号列表（数十字），512 含思考预算绰绰有余
+        } catch (Exception e) {
+            Log.e(TAG, "rerank 调用失败，返回空表由调用方降级", e);
+            return new ArrayList<>();
+        }
+        List<Integer> ids = parseRerankIds(resp, candidates.size(), topK);
+        Log.d(TAG, "rerank: 候选 " + candidates.size() + " 条 → 选中 " + ids.size()
+                + " 条");
+        return ids;
+    }
+
+    /** 解析 rerank 输出：扫描数字 token（前一字符不得为字母/数字，防误配），
+     *  范围 1..n、按首次出现去重、至多 k 个；NONE/空串/纯解释文本 → 空表（调用方降级） */
+    static List<Integer> parseRerankIds(String resp, int n, int k) {
+        List<Integer> out = new ArrayList<>();
+        int i = 0;
+        while (i < resp.length() && out.size() < k) {
+            char c = resp.charAt(i);
+            if (c < '0' || c > '9'
+                    || (i > 0 && Character.isLetterOrDigit(resp.charAt(i - 1)))) {
+                i++;
+                continue;
+            }
+            int j = i;
+            while (j < resp.length() && resp.charAt(j) >= '0' && resp.charAt(j) <= '9') j++;
+            long v = Long.parseLong(resp.substring(i, j));   // 纯 ASCII 数字，不会抛
+            if (v >= 1 && v <= n && !out.contains((int) (v - 1))) out.add((int) (v - 1));
+            i = j;
+        }
+        return out;
+    }
+
     /** 供联网搜索用的图片解析提示词：比记忆入库的一句话描述更详细，便于搜索命中 */
     private static final String VISION_SEARCH_PROMPT =
             "详细描述这张图片的关键信息（主体、文字、场景、品牌等），不超过 80 字，供联网搜索使用。";

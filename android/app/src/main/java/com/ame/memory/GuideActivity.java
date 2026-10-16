@@ -76,6 +76,7 @@ public class GuideActivity extends AppCompatActivity {
     private Uri cameraOut;
     private File cameraFile;   // 拍照临时落点（cacheDir，用完即删）
     private boolean webOn;   // 联网开关：开=本轮先 web_search 取证入记忆再作答
+    private boolean deepOn;  // 深度重排开关（试跑档）：开=recall 全池 60 条 M3 语义重排取 top-5 注入
     private volatile boolean ready = false;  // 引擎+词典异步初始化完成标志
 
     private final ActivityResultLauncher<PickVisualMediaRequest> pickImage =
@@ -175,6 +176,11 @@ public class GuideActivity extends AppCompatActivity {
             webOn = !webOn;
             v.setBackgroundColor(webOn ? 0xFFDCE3FF : 0xFFFFFFFF);
         });
+        // 深度重排开关（选中态变色，同联网开关模式；试跑档非默认）
+        findViewById(R.id.btnDeep).setOnClickListener(v -> {
+            deepOn = !deepOn;
+            v.setBackgroundColor(deepOn ? 0xFFDCE3FF : 0xFFFFFFFF);
+        });
         // 诊断/消息列表切换
         findViewById(R.id.btnDiag).setOnClickListener(v -> toggleDiag());
         findViewById(R.id.btnSend).setOnClickListener(v -> {
@@ -196,7 +202,7 @@ public class GuideActivity extends AppCompatActivity {
             appendLocal(new Message("assistant", "思考中…", 0, null));
             io.execute(() -> {
                 try {
-                    String reply = orchestrator.chat(text, imgB64, null, webOn);
+                    String reply = orchestrator.chat(text, imgB64, null, webOn, deepOn);
                     runOnUiThread(() -> {
                         msgs.remove(pendingIdx);
                         adapter.notifyItemRemoved(pendingIdx);

@@ -14,4 +14,5 @@
     <string name="plan_button">方案</string>
     <string name="diag_button">诊断</string>
     <string name="web_button">联网</string>
+    <string name="deep_button">深度</string>
 </resources>

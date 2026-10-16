@@ -45,6 +45,8 @@
                 android:layout_height="wrap_content" android:text="拍照" />
             <Button android:id="@+id/btnWeb" android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="@string/web_button" />
+            <Button android:id="@+id/btnDeep" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="@string/deep_button" />
             <Button android:id="@+id/btnDiag" android:layout_width="wrap_content"
                 android:layout_height="wrap_content" android:text="@string/diag_button" />
         </LinearLayout>
