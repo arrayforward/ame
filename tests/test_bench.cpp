@@ -784,6 +784,35 @@ static void test_formula_rerank() {
   CHECK(r2.evidence_uids.size() <= (size_t)cfg2.k);
 }
 
+// cross-encoder 精排档（--rerank xenc）：scorer 缺失 → 优雅降级 BM25 原序。
+static void test_xenc_rerank() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");
+  BenchQuestion q;
+  q.id = "q-xenc-1";
+  q.question = "What book was recommended to Melanie?";
+  BenchConfig cfg;
+  cfg.use_entity_profile = false;
+  cfg.use_think = false;
+  cfg.rerank_mode = "xenc";
+  cfg.xenc_scorer = "/tmp/ame_test_no_such_xenc_scorer.py";  // scorer 缺失
+  auto r = answer(e, q, cfg);
+  CHECK(!r.evidence_uids.empty());
+  BenchConfig cfg_bm;
+  cfg_bm.use_entity_profile = false;
+  cfg_bm.use_think = false;
+  cfg_bm.rerank_mode = "bm25";
+  auto rb = answer(e, q, cfg_bm);
+  CHECK(rb.evidence_uids.size() == r.evidence_uids.size());
+  for (size_t i = 0; i < r.evidence_uids.size(); ++i)
+    CHECK(r.evidence_uids[i] == rb.evidence_uids[i]);  // 降级 BM25 原序
+}
+
 // 模式门控：bm25 档（默认）即使有 LLM 客户端/全池标志也不触发重排（Fake 零调用）；
 // cheap 档未配模型路径 → 日志降级、行为 = BM25 原序。
 static void test_rerank_mode_gating() {
@@ -842,6 +871,7 @@ int main() {
   test_cheap_rerank();
   test_svec_rerank();
   test_formula_rerank();
+  test_xenc_rerank();
   test_rerank_mode_gating();
   test_parse_session_date();
   test_store_adapters();

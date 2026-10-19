@@ -134,6 +134,11 @@ struct BenchConfig {
   std::vector<double> formula_w = {0.9, 0.7, 0.9, 0.5, 0.6, 0.6, 0.4, -0.5};
   // 权重序：bm25, involves, related, next, cooccur, time, fusion, opposite
   std::string formula_dump;                 // --formula-dump PATH：逐候选特征贡献 ndjson
+  // ---- cross-encoder 精排档（--rerank xenc，bge-reranker-base 外挂 scorer）----
+  // 每题一次 spawn（协议同 svec）：pair "[CLS]q[SEP]d[SEP]" 前向取 [CLS] logit →
+  // 直接按分重排 top-N（cross-encoder 是判别式打分，非特征）。scorer 失败 →
+  // 降级 BM25 原序（零依赖兜底，日志明示）。
+  std::string xenc_scorer = "bench/scripts/xenc_scorer.py";
   // ---- 实体档案通道低置信放行（--entity-pass-threshold，默认 -1=关=现状）----
   // 通道裁决（answer_entity_channel 非弃权整通道返回）时置信 = 通道榜首内容分
   // （槽位直查恒 1.0）。置信 < 阈值 → 不整通道返回，其候选去重并入标准管道候选池

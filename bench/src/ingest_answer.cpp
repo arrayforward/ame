@@ -422,6 +422,61 @@ static std::pair<std::vector<double>, std::vector<FormulaFeat>> formula_score_po
   return {total, ff};
 }
 
+
+// run_xenc_scorer：cross-encoder 精排外挂打分器（协议同 run_svec_scorer：
+// 临时文件 JSON in / stdout 单行 JSON out / 末行容错解析），返回每候选得分；
+// 失败（spawn/解析/长度/非有限）→ 空 vector，调用方降级 BM25 原序。
+static std::vector<double> run_xenc_scorer(const std::string& scorer_path,
+                                           const std::string& question,
+                                           const std::vector<const ScoredEvent*>& evs,
+                                           double* elapsed_ms) {
+  auto t0 = std::chrono::steady_clock::now();
+  std::vector<double> out;
+  char tmp_path[] = "/tmp/ame_xenc_pool_XXXXXX";
+  int fd = mkstemp(tmp_path);
+  if (fd < 0) return out;
+  {
+    std::ofstream f(tmp_path);
+    Json j = Json::object();
+    j["question"] = Json::string(question);
+    Json arr = Json::array();
+    for (auto* se : evs) arr.push(Json::string(se->event->text));
+    j["texts"] = arr;
+    f << j.dump();
+  }
+  close(fd);
+  std::string cmd = "python \"" + scorer_path + "\" --pool \"" + std::string(tmp_path) + "\"";
+  std::string raw;
+  FILE* fp = popen(cmd.c_str(), "r");
+  int rc = -1;
+  if (fp) {
+    char buf[4096];
+    while (size_t n = fread(buf, 1, sizeof(buf), fp)) raw.append(buf, n);
+    rc = pclose(fp);
+  }
+  std::remove(tmp_path);
+  *elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                    .count();
+  if (rc != 0 || raw.empty()) return out;
+  size_t end = raw.find_last_not_of(" \t\r\n");
+  if (end == std::string::npos) return out;
+  size_t begin = raw.rfind('\n', end);
+  begin = (begin == std::string::npos) ? 0 : begin + 1;
+  std::string last = raw.substr(begin, end - begin + 1);
+  bool ok = false;
+  Json j = Json::parse(last, &ok);
+  if (!ok || j.kind != Json::Obj) return out;
+  const Json* sc = j.find("scores");
+  if (!sc || sc->kind != Json::Arr || sc->arr.size() != evs.size()) return out;
+  out.reserve(evs.size());
+  for (auto& v : sc->arr) {
+    double x = v.as_num();
+    if (!std::isfinite(x)) return {};
+    out.push_back(x);
+  }
+  return out;
+}
+
 // question_entity_tokens：问题专名 token（大写非句首，len≥2，小写化）——
 // 与 cheap_rerank_train.py / svec_eval.py 同口径。
 static std::vector<std::string> question_entity_tokens(const std::string& question) {
@@ -937,7 +992,8 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           ent.evidence_uids = std::move(reranked);
         }
         if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap" ||
-            cfg.rerank_mode == "svec" || cfg.rerank_mode == "formula")
+            cfg.rerank_mode == "svec" || cfg.rerank_mode == "formula" ||
+            cfg.rerank_mode == "xenc")
           std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
                        q.id.c_str());
         return ent;
@@ -1246,6 +1302,28 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           j["y"] = Json::number(0);  // 拟合脚本用 m12 日志回填标签
           f << j.dump() << "\n";
         }
+      }
+    } else if (cfg.rerank_mode == "xenc") {
+      // cross-encoder 精排：pair 打分直接定序（判别式，非特征合成）。
+      // scorer 失败 → 降级 BM25 原序（零依赖兜底，日志明示）。
+      double scorer_ms = 0.0;
+      std::vector<double> xs = run_xenc_scorer(cfg.xenc_scorer, q.question, evs, &scorer_ms);
+      const bool scorer_ok = xs.size() == evs.size();
+      if (!scorer_ok) {
+        std::fprintf(stderr,
+                     "  [xenc-rerank] %s: scorer 不可用（%.0fms），降级 BM25 原序",
+                     q.id.c_str(), scorer_ms);
+      } else {
+        std::vector<size_t> ord(evs.size());
+        for (size_t i = 0; i < evs.size(); ++i) ord[i] = i;
+        std::stable_sort(ord.begin(), ord.end(),
+                         [&](size_t a, size_t b) { return xs[a] > xs[b]; });
+        size_t kk = std::min<size_t>((size_t)cfg.k, ord.size());
+        std::string sel_dias =
+            apply_selection(std::vector<size_t>(ord.begin(), ord.begin() + kk));
+        std::fprintf(stderr,
+                     "  [xenc-rerank] %s: 置顶 %zu/%zu 条 | scorer %.0fms | 榜首内容分 %.3f | 选中: %s",
+                     q.id.c_str(), kk, evs.size(), scorer_ms, top_content, sel_dias.c_str());
       }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);

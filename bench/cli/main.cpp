@@ -70,6 +70,7 @@ struct Cli {
   int formula_window = 0;      // --formula-window N：formula 档候选池扩到 M（0=用默认 120）
   std::string formula_w;       // --formula-w "w0,...,w7"：公式权重注入（空=先验默认）
   std::string formula_dump;    // --formula-dump PATH：逐候选特征贡献 ndjson
+  std::string xenc_scorer;     // --xenc-scorer PATH：cross-encoder 打分器（默认 bench/scripts/xenc_scorer.py）
   std::string rerank_mode;     // --rerank bm25|cheap|svec|llm（空=未显式指定，由别名/默认推定）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
@@ -134,6 +135,7 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--formula-window") cli.formula_window = std::atoi(next().c_str());
     else if (a == "--formula-w") cli.formula_w = next();
     else if (a == "--formula-dump") cli.formula_dump = next();
+    else if (a == "--xenc-scorer") cli.xenc_scorer = next();
     else if (a == "--rerank") cli.rerank_mode = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
@@ -225,6 +227,7 @@ int main(int argc, char** argv) {
     }
   }
   cli.cfg.formula_dump = cli.formula_dump;  // --formula-dump（默认空=不 dump）
+  if (!cli.xenc_scorer.empty()) cli.cfg.xenc_scorer = cli.xenc_scorer;  // --xenc-scorer
 
   // ---- 终排模式消解（--rerank bm25|cheap|llm 一等公民；旧开关为兼容别名）----
   // 互斥：显式 --rerank 与别名开关（--llm-rerank N>0 / --llm-rerank-all / --cheap-rerank）
@@ -247,8 +250,8 @@ int main(int argc, char** argv) {
     }
     std::string mode = modes.empty() ? "bm25" : *modes.begin();
     if (mode != "bm25" && mode != "cheap" && mode != "svec" && mode != "formula" &&
-        mode != "llm") {
-      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|svec|formula|llm）\n", mode.c_str());
+        mode != "xenc" && mode != "llm") {
+      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|svec|formula|xenc|llm）\n", mode.c_str());
       return 1;
     }
     if (mode == "llm" && !cli.llm_rerank_all && cli.llm_rerank <= 0)
