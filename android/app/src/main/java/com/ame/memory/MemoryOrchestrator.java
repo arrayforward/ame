@@ -419,6 +419,17 @@ public class MemoryOrchestrator {
             }
         }
 
+        // 作答要求（bench e8e4bd4 验证过的三指令，judge 0.63→0.73 的红利移植；
+        // 证据自带 [yyyy-MM-dd HH:mm] 日期前缀，供时序锚定换算）
+        sb.append("\n\n作答要求：")
+          .append("\n- 时序锚定：when 类问题必须用证据中的绝对日期（各证据自带日期前缀）；")
+          .append("证据只有相对时间（昨天/上周/yesterday/last week）时，按日期前缀换算并给出")
+          .append("完整日期，不得照抄相对时间。")
+          .append("\n- 列表穷尽：问题以复数形式列举（哪些活动/书/事件/东西…）时，逐项列出证据中")
+          .append("所有相关条目，宁多勿漏，用逗号分隔。")
+          .append("\n- 前提归属核对：问题的人物/归属/事件与证据不符时，先指出正确归属，")
+          .append("再基于正确归属作答；不得照单接受错误前提。");
+
         List<String> evidence = new ArrayList<>();
         if (!items.isEmpty()) {
             sb.append("\n\n相关记忆（来自历史对话，可能超出当前上下文窗口）：");
