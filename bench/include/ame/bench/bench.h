@@ -121,6 +121,19 @@ struct BenchConfig {
   // （svec_cos 置 0 → 特征贡献归零，由其余 11 特征排序，不降级 BM25 原序）。
   std::string svec_rerank_path;             // 12 特征模型 JSON；空 = svec 档未配模型
   std::string svec_scorer = "bench/scripts/svec_scorer.py";  // 外挂打分器脚本
+  // ---- 路由打分公式档（--rerank formula，cheap 的上位替代：零 LLM、公式可解释）----
+  // 窗口 M 扩池（--formula-window，默认 120）→ 七语义关系特征加减分 → 线性合成
+  // → 新 top-N。权重先验 = 传导系数语义档，CLI 可配；离线拟合版用 --formula-w 注入。
+  // 特征（全部 Engine 图结构提取，逐候选贡献可 --formula-dump 落盘）：
+  //   bm25/fusion 基线分（归一）；involves=查询实体→事件 INVOLVES 跳数倒数；
+  //   related=查询词↔事件关键词经 RELATED 六类的最大 边权×传导系数（直连词=1）；
+  //   next=与最近 BM25 命中事件的叙事序距离倒数；cooccur=共现结晶边数 log1p；
+  //   time=时间词问题的时间窗相容（窗内+1/窗外-1，非时间题=0 不激活）；
+  //   opposite=查询词↔事件关键词经反义边 → 减分项（负值）。
+  int formula_window = 120;                 // --formula-window：候选池扩到 M
+  std::vector<double> formula_w = {0.9, 0.7, 0.9, 0.5, 0.6, 0.6, 0.4, -0.5};
+  // 权重序：bm25, involves, related, next, cooccur, time, fusion, opposite
+  std::string formula_dump;                 // --formula-dump PATH：逐候选特征贡献 ndjson
   // ---- 实体档案通道低置信放行（--entity-pass-threshold，默认 -1=关=现状）----
   // 通道裁决（answer_entity_channel 非弃权整通道返回）时置信 = 通道榜首内容分
   // （槽位直查恒 1.0）。置信 < 阈值 → 不整通道返回，其候选去重并入标准管道候选池

@@ -67,6 +67,9 @@ struct Cli {
   std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
   std::string svec_rerank;     // --svec-rerank PATH：svec 档 12 特征模型 JSON（空=关）
   std::string svec_scorer;     // --svec-scorer PATH：外挂打分器脚本（默认 bench/scripts/svec_scorer.py）
+  int formula_window = 0;      // --formula-window N：formula 档候选池扩到 M（0=用默认 120）
+  std::string formula_w;       // --formula-w "w0,...,w7"：公式权重注入（空=先验默认）
+  std::string formula_dump;    // --formula-dump PATH：逐候选特征贡献 ndjson
   std::string rerank_mode;     // --rerank bm25|cheap|svec|llm（空=未显式指定，由别名/默认推定）
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
@@ -128,6 +131,9 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--cheap-rerank") cli.cheap_rerank = next();
     else if (a == "--svec-rerank") cli.svec_rerank = next();
     else if (a == "--svec-scorer") cli.svec_scorer = next();
+    else if (a == "--formula-window") cli.formula_window = std::atoi(next().c_str());
+    else if (a == "--formula-w") cli.formula_w = next();
+    else if (a == "--formula-dump") cli.formula_dump = next();
     else if (a == "--rerank") cli.rerank_mode = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
@@ -206,6 +212,19 @@ int main(int argc, char** argv) {
   cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
   cli.cfg.svec_rerank_path = cli.svec_rerank;       // --svec-rerank（默认空=关）
   if (!cli.svec_scorer.empty()) cli.cfg.svec_scorer = cli.svec_scorer;  // --svec-scorer
+  // ---- formula 档参数：窗口（默认 120）、权重注入（CSV 8 个）、特征 dump ----
+  if (cli.formula_window > 0) cli.cfg.formula_window = cli.formula_window;
+  if (!cli.formula_w.empty()) {
+    cli.cfg.formula_w.clear();
+    std::stringstream ss(cli.formula_w);
+    std::string item;
+    while (std::getline(ss, item, ',')) cli.cfg.formula_w.push_back(std::atof(item.c_str()));
+    if (cli.cfg.formula_w.size() != 8) {
+      std::fprintf(stderr, "--formula-w 需 8 个权重（bm25,involves,related,next,cooccur,time,fusion,opposite）\n");
+      return 1;
+    }
+  }
+  cli.cfg.formula_dump = cli.formula_dump;  // --formula-dump（默认空=不 dump）
 
   // ---- 终排模式消解（--rerank bm25|cheap|llm 一等公民；旧开关为兼容别名）----
   // 互斥：显式 --rerank 与别名开关（--llm-rerank N>0 / --llm-rerank-all / --cheap-rerank）
@@ -227,8 +246,9 @@ int main(int argc, char** argv) {
       return 1;
     }
     std::string mode = modes.empty() ? "bm25" : *modes.begin();
-    if (mode != "bm25" && mode != "cheap" && mode != "svec" && mode != "llm") {
-      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|svec|llm）\n", mode.c_str());
+    if (mode != "bm25" && mode != "cheap" && mode != "svec" && mode != "formula" &&
+        mode != "llm") {
+      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|svec|formula|llm）\n", mode.c_str());
       return 1;
     }
     if (mode == "llm" && !cli.llm_rerank_all && cli.llm_rerank <= 0)
@@ -237,6 +257,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "--rerank svec 需 --svec-rerank PATH（12 特征模型 JSON）\n");
       return 1;
     }
+    if (mode == "formula") cli.cfg.k_pool = cli.cfg.formula_window;  // 扩窗：候选池 k_pool→M
     cli.cfg.rerank_mode = mode;
   }
 

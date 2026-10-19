@@ -748,6 +748,42 @@ static void test_svec_rerank() {
   CHECK(front_dia(answer(e, q, bm)) == "D2:1");
 }
 
+// formula 档（--rerank formula）：纯 bm25 权重下排序应与 bm25 原序一致（无崩溃、
+// 无图特征干扰的退化路径）；图特征非零权重下不崩溃即可（覆盖数由报告验收）。
+static void test_formula_rerank() {
+  Engine e;
+  const TimePoint ts0 = 1700000000;
+  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
+                  ts0, "D1:1", "s1");
+  e.remember_turn("Caroline",
+                  "Caroline asks what book to read next; did you finish your book?",
+                  ts0 + 60, "D2:1", "s2");
+  BenchQuestion q;
+  q.id = "q-formula-1";
+  q.question = "What book was recommended to Melanie?";
+  BenchConfig cfg;
+  cfg.use_entity_profile = false;
+  cfg.use_think = false;
+  cfg.rerank_mode = "formula";
+  cfg.formula_w = {1, 0, 0, 0, 0, 0, 0, 0};  // 纯 bm25 → 与 BM25 终排序一致
+  auto r = answer(e, q, cfg);
+  CHECK(!r.evidence_uids.empty());
+  BenchConfig cfg_bm;
+  cfg_bm.use_entity_profile = false;
+  cfg_bm.use_think = false;
+  cfg_bm.rerank_mode = "bm25";
+  auto rb = answer(e, q, cfg_bm);
+  CHECK(rb.evidence_uids.size() == r.evidence_uids.size());
+  for (size_t i = 0; i < r.evidence_uids.size(); ++i)
+    CHECK(r.evidence_uids[i] == rb.evidence_uids[i]);
+  // 全先验权重 + 扩窗：不崩溃、证据数不超 k
+  BenchConfig cfg2 = cfg;
+  cfg2.formula_w = {0.9, 0.7, 0.9, 0.5, 0.6, 0.6, 0.4, -0.5};
+  cfg2.formula_window = 120;
+  auto r2 = answer(e, q, cfg2);
+  CHECK(r2.evidence_uids.size() <= (size_t)cfg2.k);
+}
+
 // 模式门控：bm25 档（默认）即使有 LLM 客户端/全池标志也不触发重排（Fake 零调用）；
 // cheap 档未配模型路径 → 日志降级、行为 = BM25 原序。
 static void test_rerank_mode_gating() {
@@ -805,6 +841,7 @@ int main() {
   test_rerank_guard();
   test_cheap_rerank();
   test_svec_rerank();
+  test_formula_rerank();
   test_rerank_mode_gating();
   test_parse_session_date();
   test_store_adapters();

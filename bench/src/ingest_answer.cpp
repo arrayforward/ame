@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <queue>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -253,6 +254,172 @@ static std::vector<double> run_svec_scorer(const std::string& scorer_path,
     out.push_back(x);
   }
   return out;
+}
+
+// ---- formula 档（--rerank formula）：七语义关系特征线性合成重排（零 LLM）----
+// 特征口径与权重语义见 bench.h 声明注释；权重 CLI 可配/离线拟合注入。
+// 逐候选贡献可落盘（--formula-dump），可解释性产物。
+struct FormulaFeat {
+  double bm25 = 0, involves = 0, related = 0, next = 0, cooccur = 0, time = 0,
+         fusion = 0, opposite = 0;
+};
+
+static std::vector<std::string> question_entity_tokens(const std::string& question);
+
+static std::unordered_set<std::string> text_words_set(const std::string& text) {
+  std::unordered_set<std::string> out;
+  std::string cur;
+  auto flush = [&] {
+    if (cur.size() >= 3) out.insert(cur);
+    cur.clear();
+  };
+  for (unsigned char c : text) {
+    if (c < 128 && std::isalnum(c)) cur += (char)std::tolower(c);
+    else flush();
+  }
+  flush();
+  return out;
+}
+
+// query_keyword_rel：查询内容词 → 关键词节点的 RELATED 邻接表（预算一次/题）。
+// rel_best[事件关键词uid] = 最大 边权×传导系数；cooccur_cnt[...] = 共现边数；
+// opposite_hit[...] = 经 REL_OPPOSITE 连接（权取边权×0.5 传导）。
+static void query_keyword_maps(Storage& st, const std::unordered_set<std::string>& words,
+                               std::unordered_map<std::string, double>& rel_best,
+                               std::unordered_map<std::string, int>& cooccur_cnt,
+                               std::unordered_map<std::string, double>& opposite_hit) {
+  static const std::vector<RelType> kRel = {RelType::REL_CAUSE, RelType::REL_INFER,
+                                            RelType::REL_PART,  RelType::REL_SIMILAR,
+                                            RelType::REL_COOCCUR};
+  for (auto& w : words) {
+    const Node* kw = st.find_by_name(NodeKind::Keyword, w);
+    if (!kw) continue;
+    for (auto& [e, other] : st.neighbors(kw->uid, &kRel)) {
+      double v = e.weight * conduction_coeff(e.type);
+      auto it = rel_best.find(other->uid);
+      if (it == rel_best.end() || v > it->second) rel_best[other->uid] = v;
+      if (e.type == RelType::REL_COOCCUR) ++cooccur_cnt[other->uid];
+    }
+    for (auto& [e, other] : st.neighbors(kw->uid, {RelType::REL_OPPOSITE})) {
+      double v = e.weight * conduction_coeff(RelType::REL_OPPOSITE);
+      auto it = opposite_hit.find(other->uid);
+      if (it == opposite_hit.end() || v > it->second) opposite_hit[other->uid] = v;
+    }
+  }
+}
+
+// formula_score_pool：对 BM25 终排后全池逐候选算七特征并合成，返回 (总分, 特征)。
+static std::pair<std::vector<double>, std::vector<FormulaFeat>> formula_score_pool(
+    Engine& engine, const std::string& question, const std::string& question_date,
+    const std::vector<const ScoredEvent*>& evs, const std::vector<double>& cs,
+    const std::vector<double>& w) {
+  Storage& st = engine.storage();
+  const size_t n = evs.size();
+  auto minmax = [&](const std::vector<double>& v, size_t i) {
+    double lo = *std::min_element(v.begin(), v.end());
+    double hi = *std::max_element(v.begin(), v.end());
+    return hi > lo ? (v[i] - lo) / (hi - lo) : 0.0;
+  };
+  std::vector<double> fus(n);
+  double bm_max = cs[0];
+  for (size_t i = 0; i < n; ++i) {
+    fus[i] = evs[i]->score;
+    bm_max = std::max(bm_max, cs[i]);
+  }
+  if (bm_max <= 0) bm_max = 1.0;
+
+  // 查询侧预算：内容词 / 实体节点 / 关键词关系图 / 时间窗
+  std::unordered_set<std::string> words = text_words_set(question);
+  auto ents = question_entity_tokens(question);
+  std::vector<std::string> ent_uids;
+  for (auto& t : ents) {
+    std::string cap = t;
+    if (!cap.empty()) cap[0] = (char)std::toupper((unsigned char)cap[0]);
+    if (const Node* nd = st.find_by_name(NodeKind::Entity, cap)) ent_uids.push_back(nd->uid);
+    else if (const Node* nd2 = st.find_by_name(NodeKind::Entity, t)) ent_uids.push_back(nd2->uid);
+  }
+  std::unordered_map<std::string, double> rel_best, opposite_hit;
+  std::unordered_map<std::string, int> cooccur_cnt;
+  query_keyword_maps(st, words, rel_best, cooccur_cnt, opposite_hit);
+
+  // f_involves：实体 BFS（INVOLVES 双向，≤2 跳）→ 事件最小跳数
+  std::unordered_map<std::string, int> hop;
+  std::queue<std::pair<std::string, int>> bq;
+  for (auto& u : ent_uids) bq.emplace(u, 0);
+  while (!bq.empty()) {
+    auto [u, d] = bq.front();
+    bq.pop();
+    if (d >= 2) continue;
+    for (auto& [e, other] : st.neighbors(u, {RelType::INVOLVES})) {
+      if (other->kind == NodeKind::Event) {
+        if (!hop.count(other->uid)) hop[other->uid] = d + 1;
+      }
+      if (d + 1 < 2 && !hop.count(other->uid + "#n")) {
+        // 实体→实体继续扩（事件已在 map 里，实体用临时标记防环）
+        if (other->kind == NodeKind::Entity) {
+          bq.emplace(other->uid, d + 1);
+          hop[other->uid + "#n"] = 1;
+        }
+      }
+    }
+  }
+
+  // 叙事序：按 ts 排序的位次；BM25 命中集 = cs>0
+  std::vector<size_t> by_ts(n);
+  for (size_t i = 0; i < n; ++i) by_ts[i] = i;
+  std::stable_sort(by_ts.begin(), by_ts.end(), [&](size_t a, size_t b) {
+    return evs[a]->event->ts < evs[b]->event->ts;
+  });
+  std::vector<int> seq(n, 0);
+  for (size_t r = 0; r < n; ++r) seq[by_ts[r]] = (int)r;
+
+  bool temporal = false;
+  {
+    std::string ql = question;
+    for (auto& c : ql) c = (char)std::tolower((unsigned char)c);
+    static const char* kTw[] = {"when", "what time", "what date", "how long", "date",
+                                "before", "after",  "ago",        "recent",  "recently",
+                                "order", "earlier", "later",      "以前",    "之后",  "最近"};
+    for (auto* t : kTw)
+      if (ql.find(t) != std::string::npos) { temporal = true; break; }
+  }
+  TimePoint qdate = parse_session_date(question_date, 0);
+  const TimePoint win_lo = qdate > 0 ? qdate - 180LL * 86400 : 0;  // 窗=(qdate-180d, qdate]
+
+  std::vector<double> total(n, 0.0);
+  std::vector<FormulaFeat> ff(n);
+  for (size_t i = 0; i < n; ++i) {
+    auto& f = ff[i];
+    const Node* e = evs[i]->event;
+    f.bm25 = cs[i] / bm_max;
+    f.fusion = minmax(fus, i);
+    // f_involves
+    auto hi = hop.find(e->uid);
+    if (hi != hop.end()) f.involves = 1.0 / (1.0 + hi->second);
+    // f_related / f_cooccur / f_opposite：事件关键词 × 查询词关系图
+    for (auto& [ke, kwnode] : st.neighbors(e->uid, {RelType::CONTAINS})) {
+      if (words.count(kwnode->name)) f.related = 1.0;  // 查询词直连事件关键词
+      auto rb = rel_best.find(kwnode->uid);
+      if (rb != rel_best.end()) f.related = std::max(f.related, rb->second);
+      auto cc = cooccur_cnt.find(kwnode->uid);
+      if (cc != cooccur_cnt.end()) f.cooccur += cc->second;
+      auto oh = opposite_hit.find(kwnode->uid);
+      if (oh != opposite_hit.end()) f.opposite = std::min(f.opposite, -oh->second);
+    }
+    f.cooccur = std::log1p(f.cooccur);
+    // f_next：与最近 BM25 命中（cs>0）事件的叙事序距离倒数
+    int best_d = 1 << 30;
+    for (size_t j = 0; j < n; ++j) {
+      if (cs[j] <= 0 || (int)j == (int)i) continue;
+      best_d = std::min(best_d, std::abs(seq[i] - seq[j]));
+    }
+    if (best_d < (1 << 30)) f.next = 1.0 / (1.0 + best_d);
+    // f_time：时间词题的时间窗相容（窗内 +1 / 窗外 -1；非时间题 0 不激活）
+    if (temporal && qdate > 0) f.time = (e->ts > win_lo && e->ts <= qdate) ? 1.0 : -1.0;
+    total[i] = w[0] * f.bm25 + w[1] * f.involves + w[2] * f.related + w[3] * f.next +
+               w[4] * f.cooccur + w[5] * f.time + w[6] * f.fusion + w[7] * f.opposite;
+  }
+  return {total, ff};
 }
 
 // question_entity_tokens：问题专名 token（大写非句首，len≥2，小写化）——
@@ -770,7 +937,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
           ent.evidence_uids = std::move(reranked);
         }
         if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap" ||
-            cfg.rerank_mode == "svec")
+            cfg.rerank_mode == "svec" || cfg.rerank_mode == "formula")
           std::fprintf(stderr, "  [llm-rerank] %s: 实体档案通道提前返回，未重排\n",
                        q.id.c_str());
         return ent;
@@ -1033,10 +1200,57 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
                        scorer_ok ? "" : "(降级)", top_content, sel_dias.c_str());
         }
       }
+    } else if (cfg.rerank_mode == "formula") {
+      // 路由打分公式重排：七语义关系特征线性合成（零 LLM，公式可解释；
+      // 权重先验=传导系数语义档，--formula-w 注入拟合值，逐候选贡献 --formula-dump）。
+      const std::vector<double> w = cfg.formula_w.size() == 8
+                                        ? cfg.formula_w
+                                        : std::vector<double>{0.9, 0.7, 0.9, 0.5,
+                                                              0.6, 0.6, 0.4, -0.5};
+      const size_t n_pool = evs.size();
+      auto t0 = std::chrono::steady_clock::now();
+      auto scored = formula_score_pool(engine, q.question, q.question_date, evs, cs, w);
+      auto& total = scored.first;
+      auto& ff = scored.second;
+      double feat_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count();
+      std::vector<size_t> ord(n_pool);
+      for (size_t i = 0; i < n_pool; ++i) ord[i] = i;
+      std::stable_sort(ord.begin(), ord.end(),
+                       [&](size_t a, size_t b) { return total[a] > total[b]; });
+      size_t kk = std::min<size_t>((size_t)cfg.k, ord.size());
+      std::string sel_dias = apply_selection(std::vector<size_t>(ord.begin(), ord.begin() + kk));
+      std::fprintf(stderr,
+                   "  [formula] %s: 置顶 %zu/%zu 条 | 特征 %.1fms | 榜首内容分 %.3f | 选中: %s\n",
+                   q.id.c_str(), kk, n_pool, feat_ms, top_content, sel_dias.c_str());
+      if (!cfg.formula_dump.empty()) {  // 逐候选特征贡献（可解释性产物，诊断向）
+        std::vector<int> rank_of(n_pool, 0);
+        for (size_t r = 0; r < n_pool; ++r) rank_of[ord[r]] = (int)r + 1;
+        std::ofstream f(cfg.formula_dump, std::ios::app);
+        for (size_t i = 0; i < n_pool; ++i) {
+          auto dia = evs[i]->event->attrs.find("dia_id");
+          Json j = Json::object();
+          j["qid"] = Json::string(q.id);
+          j["dia"] = Json::string(dia != evs[i]->event->attrs.end() ? dia->second : "-");
+          j["rank"] = Json::number(rank_of[i]);
+          j["total"] = Json::number(total[i]);
+          j["bm25"] = Json::number(ff[i].bm25);
+          j["involves"] = Json::number(ff[i].involves);
+          j["related"] = Json::number(ff[i].related);
+          j["next"] = Json::number(ff[i].next);
+          j["cooccur"] = Json::number(ff[i].cooccur);
+          j["time"] = Json::number(ff[i].time);
+          j["fusion"] = Json::number(ff[i].fusion);
+          j["opposite"] = Json::number(ff[i].opposite);
+          j["y"] = Json::number(0);  // 拟合脚本用 m12 日志回填标签
+          f << j.dump() << "\n";
+        }
+      }
     }
     if ((int)evs.size() > cfg.k) evs.resize(cfg.k);
   } else if ((cfg.rerank_mode == "llm" && cfg.llm_client) || cfg.rerank_mode == "cheap" ||
-             cfg.rerank_mode == "svec") {
+             cfg.rerank_mode == "svec" || cfg.rerank_mode == "formula") {
     std::fprintf(stderr, "  [llm-rerank] %s: 候选≤1，未重排\n", q.id.c_str());
   }
 
