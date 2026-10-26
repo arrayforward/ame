@@ -104,8 +104,8 @@ public class ChatActivity extends AppCompatActivity {
         // 大图快照同步解析曾导致进页面卡死；就绪前发送/诊断 gated
         io.execute(() -> {
             String dir = store.sessionDir(sessionId).getAbsolutePath();
-            AmeEngine eng = AmeEngine.create(dir;
-            if (eng instanceof AmeEngine) KeywordDict.ensureLoaded(this, (AmeEngine) eng);
+            AmeEngine eng = AmeEngine.create(dir);
+            KeywordDict.ensureLoaded(this, eng);
             runOnUiThread(() -> {
                 engine = eng;
                 orchestrator = new MemoryOrchestrator(eng, store, sessionId);

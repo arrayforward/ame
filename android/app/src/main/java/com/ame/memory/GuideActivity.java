@@ -124,7 +124,7 @@ public class GuideActivity extends AppCompatActivity {
         final String sessionNameF = sessionName;   // lambda 捕获需 effectively final
         io.execute(() -> {
             AmeEngine eng = AmeEngine.create(sessionDir.getAbsolutePath());
-            if (eng instanceof AmeEngine) KeywordDict.ensureLoaded(this, (AmeEngine) eng);
+            KeywordDict.ensureLoaded(this, eng);
             runOnUiThread(() -> {
                 engine = eng;
                 orchestrator = new MemoryOrchestrator(eng, store, sessionId,
