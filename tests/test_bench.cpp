@@ -348,7 +348,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;  // 只验标准管道重排
-    cfg.use_think = false;
     cfg.llm_rerank = 5;
     cfg.rerank_mode = "llm";
     FakeLlmClient fake;
@@ -364,7 +363,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;
-    cfg.use_think = false;
     cfg.llm_rerank = 5;
     cfg.rerank_mode = "llm";
     FakeLlmClient fake;
@@ -378,7 +376,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;
-    cfg.use_think = false;
     cfg.llm_rerank = 5;
     cfg.rerank_mode = "llm";
     FakeLlmClient fake;
@@ -392,7 +389,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;
-    cfg.use_think = false;
     FakeLlmClient fake;
     fake.default_response = "E1";  // 即便有客户端也不该被调用
     cfg.llm_client = &fake;
@@ -420,7 +416,6 @@ static void test_entity_pass_through() {
   // 组1：默认（阈值 -1 = 关）→ 整通道返回现状：证据仅通道候选 D1:1
   {
     BenchConfig cfg;  // entity_pass_threshold 默认 -1
-    cfg.use_think = false;
     auto r = answer(e, q, cfg);
     CHECK(!r.abstained);
     // 通道整返回：1 条 dia_id 证据 + 会话标记 S:s1（answer_entity_channel 双标记惯例）
@@ -430,7 +425,6 @@ static void test_entity_pass_through() {
   // 组2：阈值 0.5 → 低置信放行：标准管道接管，通道候选并入池（D1:2 经实体扩散也入池）
   {
     BenchConfig cfg;
-    cfg.use_think = false;
     cfg.entity_pass_threshold = 0.5;
     auto r = answer(e, q, cfg);
     CHECK(!r.abstained);
@@ -445,7 +439,6 @@ static void test_entity_pass_through() {
   // 组3：阈值 0 且通道弃权情形不回归——低分通道（<0.15）本来就走标准管道
   {
     BenchConfig cfg;
-    cfg.use_think = false;
     cfg.entity_pass_threshold = 0.0;  // 0.16 ≥ 0 → 仍整通道返回
     auto r = answer(e, q, cfg);
     CHECK(!r.abstained);
@@ -468,7 +461,6 @@ static void test_llm_rerank_all() {
   q.question = "What book was recommended to Melanie?";
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.use_think = false;
   cfg.llm_rerank_all = true;  // 全池窗口
   cfg.rerank_mode = "llm";
   FakeLlmClient fake;
@@ -495,7 +487,6 @@ static void test_rerank_guard() {
   q.question = "pottery?";  // 单内容词：idf 相消，榜首分 = tf/(tf+1) = 5/6 ≈ 0.833
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.use_think = false;
   cfg.llm_rerank_all = true;
   cfg.rerank_mode = "llm";
   FakeLlmClient fake;
@@ -537,7 +528,6 @@ static void test_cheap_rerank() {
   q.question = "What book was recommended to Melanie?";
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.use_think = false;
   cfg.cheap_rerank_path = mpath;
   cfg.rerank_mode = "cheap";
   // 组1：便宜重排 → 模型序替代 BM25 序，金标（低份额）居首
@@ -592,7 +582,6 @@ static void test_svec_rerank() {
   auto mk = [&](const char* scorer) {
     BenchConfig cfg;
     cfg.use_entity_profile = false;
-    cfg.use_think = false;
     cfg.rerank_mode = "svec";
     cfg.svec_rerank_path = mpath;
     cfg.svec_scorer = scorer;
@@ -637,14 +626,12 @@ static void test_formula_rerank() {
   q.question = "What book was recommended to Melanie?";
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.use_think = false;
   cfg.rerank_mode = "formula";
   cfg.formula_w = {1, 0, 0, 0, 0, 0, 0, 0};  // 纯 bm25 → 与 BM25 终排序一致
   auto r = answer(e, q, cfg);
   CHECK(!r.evidence_uids.empty());
   BenchConfig cfg_bm;
   cfg_bm.use_entity_profile = false;
-  cfg_bm.use_think = false;
   cfg_bm.rerank_mode = "bm25";
   auto rb = answer(e, q, cfg_bm);
   CHECK(rb.evidence_uids.size() == r.evidence_uids.size());
@@ -672,14 +659,12 @@ static void test_xenc_rerank() {
   q.question = "What book was recommended to Melanie?";
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.use_think = false;
   cfg.rerank_mode = "xenc";
   cfg.xenc_scorer = "/tmp/ame_test_no_such_xenc_scorer.py";  // scorer 缺失
   auto r = answer(e, q, cfg);
   CHECK(!r.evidence_uids.empty());
   BenchConfig cfg_bm;
   cfg_bm.use_entity_profile = false;
-  cfg_bm.use_think = false;
   cfg_bm.rerank_mode = "bm25";
   auto rb = answer(e, q, cfg_bm);
   CHECK(rb.evidence_uids.size() == r.evidence_uids.size());
@@ -702,7 +687,6 @@ static void test_rerank_mode_gating() {
   q.question = "What book was recommended to Melanie?";
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.use_think = false;
   // bm25 档：全池标志 + 客户端齐备也不得触发（模式互斥于参数）
   cfg.llm_rerank_all = true;
   cfg.rerank_mode = "bm25";
@@ -716,7 +700,6 @@ static void test_rerank_mode_gating() {
   // cheap 档未配路径 → 降级 BM25 原序（Fake 同样零调用）
   BenchConfig cfg2;
   cfg2.use_entity_profile = false;
-  cfg2.use_think = false;
   cfg2.rerank_mode = "cheap";
   cfg2.llm_client = &fake;
   auto r2 = answer(e, q, cfg2);

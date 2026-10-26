@@ -1,4 +1,4 @@
-// AME 演示：中文样例数据走 remember → lookup → recall(带 explain) → think
+// AME 演示：中文样例数据走 remember → lookup → recall(带 explain)
 #include <cstdio>
 
 #include "ame/engine/engine.h"
@@ -74,18 +74,6 @@ int main() {
   for (auto& se : rr2.events)
     std::printf("  [%.3f] %s\n         路径: %s\n", se.score, se.event->text.c_str(),
                 se.explain.c_str());
-
-  hr("4. think：深度思考（多轮推理链）");
-  auto chain = e.think("老张为什么睡不着", 3);
-  for (size_t i = 0; i < chain.rounds.size(); ++i) {
-    auto& r = chain.rounds[i];
-    std::printf("第%zu轮 focus=「%s」\n", i + 1, r.focus.c_str());
-    std::printf("  %s\n", r.reflection.c_str());
-    for (auto& f : r.findings)
-      std::printf("    [%.3f] %s\n", f.score, f.event->text.c_str());
-  }
-  std::printf("答案：%s\n置信度：%.3f，终止原因：%s\n",
-              chain.answer.c_str(), chain.confidence, chain.stop_reason.c_str());
 
   hr("5. 快照 save/load");
   std::string snap = "/tmp/ame_demo_snapshot.json";

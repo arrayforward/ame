@@ -26,7 +26,6 @@ namespace ame {
 // 步骤1：按依赖顺序构造子模块——storage_ 为根；vector_/time_ 持有其指针，keyword_ 持有其引用；
 //        entity_ 依赖 storage+vector；writer_ 依赖 storage/keyword/time/vector；
 //        seed_ 依赖 storage/vector/keyword/extractor；diffusion_ 依赖 storage/keyword；
-//        rerank_ 依赖 storage/time/vector；thinker_ 依赖 storage/vector/seed/diffusion/rerank
 Engine::Engine(const std::string& data_dir)
     : storage_(),
       vector_(&storage_),
@@ -37,8 +36,7 @@ Engine::Engine(const std::string& data_dir)
       writer_(storage_, keyword_, time_, vector_),
       seed_(storage_, vector_, keyword_, &extractor_),
       diffusion_(storage_, &keyword_),
-      rerank_(storage_, time_, vector_),
-      thinker_(storage_, vector_, seed_, diffusion_, rerank_) {
+      rerank_(storage_, time_, vector_) {
   if (!data_dir.empty()) {
     std::filesystem::create_directories(data_dir);
   }
@@ -280,11 +278,6 @@ RecallResult Engine::recall(const SeedQuery& sq, const RecallFilters& filters, i
   if (!explain)
     for (auto& e : rr.events) e.explain.clear();
   return rr;
-}
-
-// 直通 M8 思考编排器，返回推理链
-ReasoningChain Engine::think(const std::string& query, int max_rounds) {
-  return thinker_.think(query, max_rounds);
 }
 
 // 直通 M2 实体解析器：把 uid_a 合并进 into_b

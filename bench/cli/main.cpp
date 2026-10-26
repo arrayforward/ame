@@ -94,11 +94,8 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--lexicon-topn") cli.lexicon_topn = std::atoi(next().c_str());
     else if (a == "--question-ids") cli.question_ids = next();
     else if (a == "--entity-profile") cli.cfg.use_entity_profile = next() != "off";
-    else if (a == "--think") cli.cfg.use_think = next() != "off";
-    else if (a == "--think-rounds") cli.cfg.think_rounds = std::atoi(next().c_str());
     else if (a == "--conditional-normalize")
       cli.cfg.conditional_normalize = next() != "off";
-    else if (a == "--think-mode") cli.cfg.think_mode = next();
     else if (a == "--answer-mode") cli.cfg.answer_mode_agg = next();
     else if (a == "--agg-prefilter-n") cli.cfg.agg_prefilter_n = std::atoi(next().c_str());
     else if (a == "--agg-batch") cli.cfg.agg_batch = std::atoi(next().c_str());
@@ -477,24 +474,6 @@ int main(int argc, char** argv) {
           std::fprintf(stderr, "  [prefilter] %s: 候选 %d → 保留 %d（砍 %d）\n",
                        q.id.c_str(), total, kept, total - kept);
         if (kept > 0) agg_jobs.push_back(std::move(job));
-      }
-      // IRCoT 模式：LLM 引导迭代检索补证据（多轮子查询，去重并入证据前部）
-      if (cli.cfg.think_mode == "ircot" && client) {
-        auto llm_fn = [&](const std::string& prompt) {
-          return client->chat({{"user", prompt}}, {0.0, 1024, false});
-        };
-        auto chain = e.think_ircot(q.question, cli.cfg.think_rounds + 2, llm_fn);
-        std::unordered_set<std::string> have(p.base.evidence_uids.begin(),
-                                             p.base.evidence_uids.end());
-        for (auto& round : chain.rounds)
-          for (auto& f : round.findings)
-            if (f.event && !have.count(f.event->uid)) {
-              have.insert(f.event->uid);
-              p.base.evidence_uids.insert(p.base.evidence_uids.begin(), f.event->uid);
-            }
-        if (!chain.subqueries.empty())
-          std::fprintf(stderr, "  [ircot] %s → %zu 轮子查询\n", q.id.c_str(),
-                       chain.subqueries.size());
       }
       for (auto& uid : p.base.evidence_uids) {
         const Node* n = e.storage().get_node(uid);

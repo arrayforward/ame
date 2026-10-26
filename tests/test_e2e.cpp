@@ -86,13 +86,6 @@ int main() {
   auto ann = e.storage().ann_search(q, 10);
   for (auto& [uid, sim] : ann) CHECK(uid != ev_insomnia->uid);
 
-  // ---------- 4. think 深度思考 ----------
-  auto chain = e.think("老张为什么睡不着", 3);
-  CHECK(!chain.rounds.empty());
-  CHECK(!chain.answer.empty());
-  CHECK(!chain.stop_reason.empty());
-
-
   // ---------- 6. 快照 save/load 后 recall 结果一致 ----------
   std::string snap = "/tmp/ame_test_e2e_snapshot.json";
   CHECK(e.save(snap) == Err::Ok);

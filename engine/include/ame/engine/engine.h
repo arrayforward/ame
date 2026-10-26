@@ -22,7 +22,6 @@
 #include "ame/rerank/reranker.h"
 #include "ame/seed/seed_generator.h"
 #include "ame/storage/storage.h"
-#include "ame/thinker/thinker.h"
 #include "ame/time/time_service.h"
 #include "ame/vector/vector_service.h"
 
@@ -94,14 +93,6 @@ class Engine {
   RecallResult recall(const SeedQuery& seeds, const RecallFilters& filters = {},
                       int depth = 2, int limit = 20, bool explain = true);
 
-  // ⑤ 深度思考
-  ReasoningChain think(const std::string& query, int max_rounds = 5);
-  // ⑤b IRCoT 式 LLM 引导迭代检索（llm_fn 为 prompt→completion 回调）
-  ReasoningChain think_ircot(const std::string& query, int max_rounds,
-                             const std::function<std::string(const std::string&)>& llm_fn) {
-    return thinker_.think_ircot(query, max_rounds, llm_fn);
-  }
-
   // ⑥ 纠错
   Err merge_entities(const std::string& uid_a, const std::string& into_b);
   std::string split_entity(const std::string& uid, const std::vector<std::string>& mention_ids);
@@ -157,7 +148,6 @@ class Engine {
   SeedGenerator seed_;
   DiffusionEngine diffusion_;
   Reranker rerank_;
-  Thinker thinker_;
 };
 
 }  // namespace ame

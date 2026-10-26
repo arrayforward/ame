@@ -62,10 +62,7 @@ struct BenchConfig {
   std::vector<int> abstention_categories = {5};  // LoCoMo 视为对抗题的类别（可配置）
   bool filter_superseded = true;    // 取证时过滤已被取代的过时事实（知识更新）
   bool use_entity_profile = true;   // 实体档案通道：两阶段检索/槽位直查（--entity-profile off 关闭）
-  bool use_think = true;            // think 通道：时序/多跳题升级 M8 多轮推理取证（--think off 关闭）
-  int think_rounds = 2;             // think 轮数（控制耗时）
   bool conditional_normalize = false;  // 条件归一：查询词无直接命中才词典扩展（--conditional-normalize on）
-  std::string think_mode = "energy";   // energy（M8 能量扩散）| ircot（LLM 引导迭代检索）
   std::string answer_mode_agg = "";    // "aggregate" 时聚合类问题走两阶段（逐项提取+聚合）
   int agg_prefilter_n = 20;            // 聚合题本地预过滤保留名额（BM25-lite 排序截断）
   int agg_batch = 5;                   // 批量提取：每次喂入的证据条数

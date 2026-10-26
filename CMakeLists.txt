@@ -28,7 +28,6 @@ add_subdirectory(graph_writer)  # M4  图写入器
 add_subdirectory(seed)          # M5  种子生成器
 add_subdirectory(diffusion)     # M6  扩散引擎
 add_subdirectory(rerank)        # M7  打分重排器
-add_subdirectory(thinker)       # M8  思考编排器
 add_subdirectory(engine)        # M12 API 网关
 add_subdirectory(bench)         # 基准适配层（LoCoMo/LongMemEval/BEAM，依赖 M12）
 add_subdirectory(llm)           # LLM 接入层（DeepSeek 客户端 + 提取/答题/评审组件）

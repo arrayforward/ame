@@ -916,31 +916,6 @@ static bool is_temporal_question(const std::string& question) {
   return false;
 }
 
-// think 证据合并辅助：跑 M8 多轮推理，把 ReasoningChain findings 事件按 uid 去重
-// 追加到 ar 的证据列表（实体通道/recall 通道共用，避免两份逻辑）；
-// qdate>0 时跳过已被 SUPERSEDES 取代（valid_to<=qdate）的过时事件（与取证过滤同语义）。
-static void merge_think_evidence(Engine& engine, const std::string& question, int rounds,
-                                 AnswerResult& ar, TimePoint qdate = 0) {
-  auto chain = engine.think(question, rounds);
-  std::unordered_set<std::string> have(ar.evidence_uids.begin(), ar.evidence_uids.end());
-  // 先收全部 findings 建候选集（新旧都在选新语义需要判断取代者是否在场）
-  std::unordered_set<std::string> present(have);
-  for (auto& round : chain.rounds)
-    for (auto& f : round.findings)
-      if (f.event) present.insert(f.event->uid);
-  for (auto& round : chain.rounds)
-    for (auto& f : round.findings) {
-      if (!f.event || have.count(f.event->uid)) continue;
-      if (qdate > 0 && replaced_by_candidate(engine, f.event, qdate, present))
-        continue;  // 有新弃旧；新值不在场则旧证据保留
-      have.insert(f.event->uid);
-      ar.evidence_uids.insert(ar.evidence_uids.begin(), f.event->uid);  // think 证据排前
-      auto it = f.event->attrs.find("dia_id");
-      if (it != f.event->attrs.end())
-        ar.evidence_dia_ids.insert(ar.evidence_dia_ids.begin(), it->second);
-    }
-}
-
 
 //   步骤0（实体通道，use_entity_profile 开启时）：问题命中已知识别人名实体 →
 //          两阶段检索（候选池圈定+池内 IDF 排序）或槽位直查；时序题叠加 think 证据；
@@ -971,10 +946,6 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
       bool pass_through =
           cfg.entity_pass_threshold >= 0.0 && ent.score < cfg.entity_pass_threshold;
       if (!pass_through) {
-        // 时序/多跳题：实体通道结果上叠加 think 证据（与标准管道共用 merge_think_evidence，
-        // 旧事实（valid_to<=qdate）在 think 证据中同样剔除）
-        if (cfg.use_think && is_temporal_question(q.question))
-          merge_think_evidence(engine, q.question, cfg.think_rounds, ent, qdate);
         // 证据终排（与标准管道同机制）：think 证据并入后按问题内容词 BM25-lite
         // 精确命中重排，防能量/时近偏置盖过词面精确命中（stable，同分保持原序）。
         if (ent.evidence_uids.size() > 1) {
@@ -1057,44 +1028,7 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
   // 低于弃答阈值时升级为多轮推理，ReasoningChain 各轮 findings 事件按 uid 去重并入
   // 证据（合并后统一内容词终排，见步骤4）。协作说明：think 的种子走 M5（词法/实体
   // 硬种子 + 软种子），实体能量垄断由 M6 出度归一与 M7 事件级归一约束，无需在答题层重复圈池。
-  std::vector<ScoredEvent> think_extra;  // think 通道证据（值持有，指针稳定）
-  if (cfg.use_think) {
-    static const char* kTemporal[] = {"when",   "before", "after", "first",  "last",
-                                      "how long", "how many", "recently", "order",
-                                      "earlier", "later",   "以前",   "之后",  "最近"};
-    std::string ql;
-    for (char c : q.question) ql += (char)std::tolower((unsigned char)c);
-    bool temporal = false;
-    for (auto* w : kTemporal)
-      if (ql.find(w) != std::string::npos) { temporal = true; break; }
-    double top_score = evs.empty() ? 0.0 : evs.front()->score;
-    if (temporal || top_score < cfg.abstain_threshold) {
-      auto chain = engine.think(q.question, cfg.think_rounds);
-      std::unordered_set<std::string> have;
-      for (auto* se : evs) have.insert(se->event->uid);
-      std::unordered_set<std::string> tpresent(have);  // 候选集含 think findings
-      for (auto& round : chain.rounds)
-        for (auto& f : round.findings)
-          if (f.event) tpresent.insert(f.event->uid);
-      for (auto& round : chain.rounds)
-        for (auto& f : round.findings) {
-          if (!f.event || have.count(f.event->uid)) continue;
-          if (cfg.filter_superseded && qdate > 0 &&
-              replaced_by_candidate(engine, f.event, qdate, tpresent))
-            continue;  // think 证据同样"新旧都在选新"
-          have.insert(f.event->uid);
-          think_extra.push_back(f);
-        }
-    }
-  }
-  if (!think_extra.empty()) {
-    // think 证据并入（终排前不区分来源），recall 证据按原序保留在后
-    std::vector<const ScoredEvent*> merged;
-    for (auto& x : think_extra) merged.push_back(&x);
-    for (auto* se : evs) merged.push_back(se);
-    evs = std::move(merged);
-  }
-  // 证据终排：对 recall 大候选池（k_pool，未提前截断）+ think 并入证据，统一按问题
+  // 证据终排：对 recall 大候选池（k_pool，未提前截断）统一按问题
   // 内容词 BM25-lite 精确命中重排（stable，同分保持原序）后才截 top-k——融合排序的
   // 能量/时近偏置只决定候选资格，不允许盖过词面精确命中。
   // L2 终排混合（--final-alpha/--final-beta 开启）：排序键从纯内容分改为
