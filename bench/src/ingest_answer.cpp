@@ -1024,7 +1024,6 @@ AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& c
   }
 
   auto rr = engine.recall(sq, filters, 2, cfg.k_pool, false);  // 大候选池
-  ar.query_id = rr.query_id;  // M11 埋点回流（未启用反馈采集时为 0）
   std::vector<const ScoredEvent*> evs;
   std::unordered_set<std::string> present;  // 候选集（新旧都在选新用）
   for (auto& se : rr.events) present.insert(se.event->uid);

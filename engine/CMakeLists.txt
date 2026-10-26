@@ -4,4 +4,4 @@ target_link_libraries(ame_engine PUBLIC
   ame_core ame_storage ame_time ame_vector
   ame_keyword ame_extractor ame_entity ame_graph_writer
   ame_seed ame_diffusion ame_rerank ame_thinker
-  ame_feedback ame_learning)
+)

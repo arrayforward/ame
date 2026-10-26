@@ -66,8 +66,6 @@ int main() {
     std::printf("         (图%.2f 语境%.2f 时%.2f) 路径: %s\n", se.graph_score,
                 se.context_score, se.time_score, se.explain.c_str());
   }
-  // 埋点 + 正反馈
-  if (!rr.events.empty()) e.feedback(rr.query_id, SignalType::Select, rr.events[0].event->uid);
 
   std::printf("\n查询「车坏了怎么办」的联想结果 top5：\n");
   SeedQuery sq2;
@@ -99,10 +97,5 @@ int main() {
                   e.storage().edge_count(), e2.storage().edge_count());
   }
 
-  hr("6. 反馈学习（α/β/γ 调优）");
-  std::string v = e.train();
-  std::printf("训练完成，模型版本：%s（已 promote）\n", v.empty() ? "(无三元组)" : v.c_str());
-  auto w = e.reranker().weights();
-  std::printf("当前融合权重 α=%.2f β=%.2f γ=%.2f\n", w.alpha, w.beta, w.gamma);
   return 0;
 }

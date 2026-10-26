@@ -27,8 +27,6 @@ namespace ame {
 //        entity_ 依赖 storage+vector；writer_ 依赖 storage/keyword/time/vector；
 //        seed_ 依赖 storage/vector/keyword/extractor；diffusion_ 依赖 storage/keyword；
 //        rerank_ 依赖 storage/time/vector；thinker_ 依赖 storage/vector/seed/diffusion/rerank
-// 步骤2：若 data_dir 非空，创建数据目录并初始化 M11 反馈采集器（feedback.jsonl）
-//        与 M14 学习引擎；否则两者保持空指针，feedback()/train() 将退化为无效调用
 Engine::Engine(const std::string& data_dir)
     : storage_(),
       vector_(&storage_),
@@ -43,8 +41,6 @@ Engine::Engine(const std::string& data_dir)
       thinker_(storage_, vector_, seed_, diffusion_, rerank_) {
   if (!data_dir.empty()) {
     std::filesystem::create_directories(data_dir);
-    feedback_ = std::make_unique<FeedbackCollector>(data_dir + "/feedback.jsonl");
-    learning_ = std::make_unique<LearningEngine>(storage_, vector_, rerank_, data_dir);
   }
 }
 
@@ -274,32 +270,15 @@ RecallResult Engine::recall(const SeedQuery& sq, const RecallFilters& filters, i
     rr.msg = "无种子命中";
     return rr;
   }
-  // ② 硬扩散 M6（beam_width>0 时束搜索；M14 门控已训练且 use_gate_ 开启时走门控传导）
+  // ② 硬扩散 M6（3.0：束搜索与 M14 门控随反馈/学习一并裁剪，恒 BFS 规则传导）
   std::vector<DiffusionSeed> ds;
   for (auto& s : seeds) ds.push_back({s.node_uid, s.weight});
-  DiffusionResult dr;
-  DiffusionEngine::GateFn gate_fn;
-  if (use_gate_ && learning_ && learning_->gate().trained) {
-    const GateModel& gm = learning_->gate();
-    gate_fn = [&gm](const Edge& e, const Node& head, const Node& tail, int hop) {
-      return gm.gate(e, head, tail, hop);
-    };
-  }
-  if (beam_width_ > 0 || gate_fn)
-    dr = diffusion_.diffuse_beam(ds, depth, nullptr, nullptr, 1000, beam_width_, gate_fn);
-  else
-    dr = diffusion_.diffuse(ds, depth);
+  DiffusionResult dr = diffusion_.diffuse(ds, depth);
   // ③ 软重排 M7
   Vec qemb = sq.text.empty() ? Vec{} : vector_.embed(sq.text);
   rr.events = rerank_.rerank(dr, qemb, filters, limit);
   if (!explain)
     for (auto& e : rr.events) e.explain.clear();
-  // M11 埋点
-  if (feedback_) {
-    std::vector<std::string> uids;
-    for (auto& e : rr.events) uids.push_back(e.event->uid);
-    rr.query_id = feedback_->log_query(sq.text, uids);
-  }
   return rr;
 }
 
@@ -317,34 +296,6 @@ Err Engine::merge_entities(const std::string& uid_a, const std::string& into_b) 
 std::string Engine::split_entity(const std::string& uid,
                                  const std::vector<std::string>& mention_ids) {
   return entity_.split_entity(uid, mention_ids);
-}
-
-// 步骤1：若 M11 未启用（构造时 data_dir 为空），返回 InvalidArg
-// 步骤2：否则把反馈信号转发给 M11 采集器落日志
-Err Engine::feedback(long query_id, SignalType signal, const std::string& target_uid,
-                     const std::string& note) {
-  if (!feedback_) return Err::InvalidArg;
-  return feedback_->log_feedback(query_id, signal, target_uid, note);
-}
-
-// 步骤1：若 M11/M14 未启用（构造时 data_dir 为空），返回空串
-// 步骤2：从 M11 导出全部反馈三元组；若为空则无可训练数据，返回空串
-// 步骤3：调用 M14 离线训练得到新版本号，将其提升为生效版本后返回
-std::string Engine::train() {
-  if (!feedback_ || !learning_) return "";
-  auto triples = feedback_->export_triples(0);
-  if (triples.empty()) return "";
-  std::string v = learning_->train_offline(triples);
-  learning_->promote(v);
-  return v;
-}
-
-// train_gate 伪代码：导出 M11 反馈 triples 交 M14 监督训练门控；
-//   数据不足（triples 为空或低于阈值）返回空串保留规则版。
-std::string Engine::train_gate() {
-  if (!feedback_ || !learning_) return "";
-  auto triples = feedback_->export_triples(0);
-  return learning_->train_gate(triples);
 }
 
 // save 伪代码（组合快照）：

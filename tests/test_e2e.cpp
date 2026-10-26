@@ -92,14 +92,6 @@ int main() {
   CHECK(!chain.answer.empty());
   CHECK(!chain.stop_reason.empty());
 
-  // ---------- 5. 反馈 → 训练 → promote ----------
-  CHECK(rr.query_id > 0);
-  CHECK(e.feedback(rr.query_id, SignalType::Select, ev_insomnia->uid) == Err::Ok);
-  if (!rr.events.empty() && rr.events[0].event->uid != ev_insomnia->uid)
-    e.feedback(rr.query_id, SignalType::Ignore, rr.events[0].event->uid);
-  std::string ver = e.train();  // 内部 promote
-  CHECK(!ver.empty());
-  CHECK(std::filesystem::exists(dir + "/model_" + ver + ".json"));
 
   // ---------- 6. 快照 save/load 后 recall 结果一致 ----------
   std::string snap = "/tmp/ame_test_e2e_snapshot.json";

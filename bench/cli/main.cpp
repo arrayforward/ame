@@ -48,7 +48,6 @@ struct Cli {
   int lexicon_topn = 2000;
   std::string save_graph;      // --save-graph PATH：摄入后整图（含档案）落 JSON（每 case 一个文件）
   std::string load_graph;      // --load-graph PATH：直接加载已摄入的图，跳过摄入/提取
-  std::string feedback_dir;    // --feedback-dir PATH：M11 埋点+judge 信号回流 + M14 调优对比
                                // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
   std::string name_alias;      // --name-alias FILE：人名/专名严等价别名表（names_zh.json，
@@ -65,8 +64,6 @@ struct Cli {
   std::string formula_dump;    // --formula-dump PATH：逐候选特征贡献 ndjson
   std::string xenc_scorer;     // --xenc-scorer PATH：cross-encoder 打分器（默认 bench/scripts/xenc_scorer.py）
   std::string rerank_mode;     // --rerank bm25|cheap|svec|llm（空=未显式指定，由别名/默认推定）
-  bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
-  double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
 };
 
@@ -101,14 +98,12 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--think-rounds") cli.cfg.think_rounds = std::atoi(next().c_str());
     else if (a == "--conditional-normalize")
       cli.cfg.conditional_normalize = next() != "off";
-    else if (a == "--beam") cli.cfg.beam_width = std::atoi(next().c_str());
     else if (a == "--think-mode") cli.cfg.think_mode = next();
     else if (a == "--answer-mode") cli.cfg.answer_mode_agg = next();
     else if (a == "--agg-prefilter-n") cli.cfg.agg_prefilter_n = std::atoi(next().c_str());
     else if (a == "--agg-batch") cli.cfg.agg_batch = std::atoi(next().c_str());
     else if (a == "--save-graph") cli.save_graph = next();
     else if (a == "--load-graph") cli.load_graph = next();
-    else if (a == "--feedback-dir") cli.feedback_dir = next();
     else if (a == "--name-alias") cli.name_alias = next();
     else if (a == "--llm-rerank") cli.llm_rerank = std::atoi(next().c_str());
     else if (a == "--llm-rerank-all") cli.llm_rerank_all = true;  // 裸开关（默认关）
@@ -129,11 +124,6 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--final-beta") {
       cli.cfg.final_beta = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
-    }
-    else if (a == "--weights") {  // α,β,γ 覆盖（M14 调优结果验证用）
-      std::string v = next();
-      std::sscanf(v.c_str(), "%lf,%lf,%lf", &cli.w_alpha, &cli.w_beta, &cli.w_gamma);
-      cli.has_weights = true;
     }
     else if (a == "--abstain-categories") {
       cli.cfg.abstention_categories.clear();
@@ -379,10 +369,9 @@ int main(int argc, char** argv) {
     std::string group;
     std::string llm_answer;
     bool llm_done = false;
-    size_t eng_idx = 0;              // 所属 Engine（M11 反馈回流出引用）
   };
   std::vector<Pending> pendings;
-  std::vector<std::unique_ptr<Engine>> engines;  // 保活到判分阶段（反馈回流用）
+
   // 聚合题候选证据（case 循环内召回，引擎存活期收集）
   struct AggJob {
     int qi;
@@ -390,47 +379,16 @@ int main(int argc, char** argv) {
   };
   std::vector<AggJob> agg_jobs;
 
-
   for (auto& c : cases) {
     // --question-ids 固定样本提速：该 case 无任何被请求的问题 → 整个跳过（含摄入）。
-    // 安全性：每 case 独立引擎、跨 case 无共享状态，未命中 case 的摄入对结果零影响。
     if (!only_qids.empty()) {
       bool any = false;
       for (auto& q : c.questions)
         if (only_qids.count(q.id)) { any = true; break; }
       if (!any) continue;
     }
-    // 跨 case 隔离；--feedback-dir 启用 M11/M14（每 case 独立目录）。
-    // 注意：只有启用反馈时才保活 Engine（判分阶段回流用）；否则每 case 用完即销毁，
-    // 避免百级 case 的全量图驻留内存（OOM 风险）。
-    std::string fdir;
-    if (!cli.feedback_dir.empty()) fdir = cli.feedback_dir + "/" + c.conversation_id;
-    std::unique_ptr<Engine> eng_up;
-    if (!cli.feedback_dir.empty()) {
-      engines.push_back(std::make_unique<Engine>(fdir));
-      eng_up.reset(engines.back().get());
-    } else {
-      eng_up = std::make_unique<Engine>(fdir);
-    }
-    Engine& e = *eng_up;
-    if (cli.has_weights)
-      e.reranker().set_weights({cli.w_alpha, cli.w_beta, cli.w_gamma});
-    // --name-alias：人名/专名严等价别名表，须在摄入前加载（写入侧 M3 normalize、
-    // M1 提取词面与 M2 实体别名均依赖它；load-graph 快照已含实体/别名时幂等跳过建档）。
-    if (!cli.name_alias.empty()) {
-      int applied = 0;
-      if (apply_name_aliases(e, cli.name_alias, &applied) == Err::Ok)
-        std::fprintf(stderr, "[name-alias] case %s 灌入 %d 条（%s）\n",
-                     c.conversation_id.c_str(), applied, cli.name_alias.c_str());
-      else
-        std::fprintf(stderr, "[warn] name-alias 加载失败（%s），按未加载继续\n",
-                     cli.name_alias.c_str());
-    }
-    // 引导式扩散阶段 1：beam 配置 + 反馈目录存在时先训监督门控
-    if (cli.cfg.beam_width > 0) {
-      e.set_diffusion_options(cli.cfg.beam_width, true);
-      if (!fdir.empty()) e.train_gate();  // 门控：反馈 triples 驱动，不足则保留规则
-    }
+    Engine e;  // 跨 case 隔离：每 case 用完即销毁，避免百级 case 全量图驻留
+
     IngestStats st;
     // --load-graph：整图（含档案槽位）已落盘则直接加载，跳过摄入与 LLM 提取（零调用）
     std::string gpath;
@@ -493,7 +451,6 @@ int main(int argc, char** argv) {
       Pending p;
       p.q = &q;
       p.group = q.qtype;
-      p.eng_idx = engines.size() - 1;
       p.base = answer(e, q, cli.cfg);  // 离线取证（baseline 答案也由此产出）
       // 聚合题：引擎存活期内召回候选并本地预过滤（BM25-lite 排序截断，零 LLM）
       if (cli.cfg.answer_mode_agg == "aggregate" &&
@@ -692,32 +649,8 @@ int main(int argc, char** argv) {
     }
     finals[i] = r;
     acc.add(p.group, *p.q, r, judge_scores[i]);
-    // M11 反馈回流：judge 结果作为监督信号（选中/忽略）落 JSONL；
-    // 实体/think 通道绕过 recall 的题（query_id==0）补记 log_query。
-    if (!cli.feedback_dir.empty() && judge_scores[i] >= 0) {
-      long qid = p.base.query_id;
-      if (qid == 0) qid = engines[p.eng_idx]->log_query(p.q->question,
-                                                        p.base.evidence_uids);
-      if (qid > 0)
-        engines[p.eng_idx]->feedback(
-            qid, judge_scores[i] >= 1.0 ? SignalType::Select : SignalType::Ignore,
-            p.base.evidence_uids.empty() ? "" : p.base.evidence_uids.front(),
-            p.q->id);
-    }
   }
 
-  // M14 学习闭环：用回流 triples 离线调 α/β/γ，打印调优前后对比（离线复评 baseline）
-  if (!cli.feedback_dir.empty()) {
-    for (size_t ei = 0; ei < engines.size(); ++ei) {
-      Engine& e = *engines[ei];
-      auto w0 = e.reranker().weights();
-      std::string ver = e.train();  // train_offline + promote
-      if (ver.empty()) continue;
-      auto w1 = e.reranker().weights();
-      std::printf("[M14] case %zu train=%s α/β/γ: %.2f/%.2f/%.2f → %.2f/%.2f/%.2f\n", ei,
-                  ver.c_str(), w0.alpha, w0.beta, w0.gamma, w1.alpha, w1.beta, w1.gamma);
-    }
-  }
 
   // 步骤5b：--dump 逐题结果 NDJSON（失败分析用）
   if (!cli.dump_path.empty()) {

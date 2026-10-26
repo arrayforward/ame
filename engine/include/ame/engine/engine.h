@@ -17,10 +17,8 @@
 #include "ame/diffusion/diffusion_engine.h"
 #include "ame/entity/entity_resolver.h"
 #include "ame/extractor/extractor.h"
-#include "ame/feedback/feedback_collector.h"
 #include "ame/graph_writer/graph_writer.h"
 #include "ame/keyword/keyword_manager.h"
-#include "ame/learning/learning_engine.h"
 #include "ame/rerank/reranker.h"
 #include "ame/seed/seed_generator.h"
 #include "ame/storage/storage.h"
@@ -55,7 +53,6 @@ struct RecallResult {
   Err code = Err::Ok;
   std::string msg;
   std::vector<ScoredEvent> events;
-  long query_id = 0;  // M11 埋点
 };
 
 class Engine {
@@ -97,13 +94,6 @@ class Engine {
   RecallResult recall(const SeedQuery& seeds, const RecallFilters& filters = {},
                       int depth = 2, int limit = 20, bool explain = true);
 
-  // 扩散选项（引导式扩散阶段 1）：beam_width>0 启用束搜索；use_gate 且 M14 门控
-  // 已训练时边传导走监督门控，否则规则传导（默认全 0/关，行为与原版一致）
-  void set_diffusion_options(int beam_width, bool use_gate) {
-    beam_width_ = beam_width;
-    use_gate_ = use_gate;
-  }
-
   // ⑤ 深度思考
   ReasoningChain think(const std::string& query, int max_rounds = 5);
   // ⑤b IRCoT 式 LLM 引导迭代检索（llm_fn 为 prompt→completion 回调）
@@ -143,18 +133,6 @@ class Engine {
     return s;
   }
 
-  // 反馈（M11）
-  Err feedback(long query_id, SignalType signal, const std::string& target_uid = "",
-               const std::string& note = "");
-  // M11 直记查询（非 recall 通道的问题也可回流，未启用反馈采集时返回 0）
-  long log_query(const std::string& query, const std::vector<std::string>& result_uids) {
-    return feedback_ ? feedback_->log_query(query, result_uids) : 0;
-  }
-  // 学习（M14）
-  std::string train();
-  // M14 监督边门控训练（引导式扩散阶段 1；数据不足返回空串保留规则版）
-  std::string train_gate();
-
   // 快照（组合格式：{"graph": M9 图快照, "slots": M2 实体档案槽位}，含 valid_to 历史）
   Err save(const std::string& path) const;
   Err load(const std::string& path);
@@ -180,10 +158,6 @@ class Engine {
   DiffusionEngine diffusion_;
   Reranker rerank_;
   Thinker thinker_;
-  std::unique_ptr<FeedbackCollector> feedback_;
-  std::unique_ptr<LearningEngine> learning_;
-  int beam_width_ = 0;    // 束搜索宽度（0=BFS，>0 为 best-first 束宽）
-  bool use_gate_ = false;  // 门控传导开关（M14 门控已训练时生效）
 };
 
 }  // namespace ame

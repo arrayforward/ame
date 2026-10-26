@@ -13,8 +13,6 @@ set(AME_TESTS
   test_diffusion     # M6  能量/路径/休眠隔离/budget
   test_rerank        # M7  融合打分/filters
   test_thinker       # M8  多轮 ReasoningChain
-  test_feedback      # M11 埋点/三元组
-  test_learning      # M14 训练/promote/rollback
   test_engine        # M12 网关动词/错误码
   test_e2e           # 端到端全链路
 )

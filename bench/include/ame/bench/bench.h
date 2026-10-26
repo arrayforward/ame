@@ -65,7 +65,6 @@ struct BenchConfig {
   bool use_think = true;            // think 通道：时序/多跳题升级 M8 多轮推理取证（--think off 关闭）
   int think_rounds = 2;             // think 轮数（控制耗时）
   bool conditional_normalize = false;  // 条件归一：查询词无直接命中才词典扩展（--conditional-normalize on）
-  int beam_width = 0;                  // 束搜索宽度（0=BFS；--beam N 启用引导式扩散阶段 1）
   std::string think_mode = "energy";   // energy（M8 能量扩散）| ircot（LLM 引导迭代检索）
   std::string answer_mode_agg = "";    // "aggregate" 时聚合类问题走两阶段（逐项提取+聚合）
   int agg_prefilter_n = 20;            // 聚合题本地预过滤保留名额（BM25-lite 排序截断）
@@ -186,7 +185,6 @@ struct AnswerResult {
   std::vector<std::string> evidence_uids;
   std::vector<std::string> evidence_dia_ids;
   double score = 0;    // 证据最高分（弃答门控依据）
-  long query_id = 0;   // M11 埋点 id（引擎反馈采集启用时非 0）
 };
 AnswerResult answer(Engine& engine, const BenchQuestion& q, const BenchConfig& cfg);
 
