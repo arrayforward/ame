@@ -322,6 +322,19 @@ name-alias 专名归一（names_zh 6/6）、AC 自动机中文通道、快照 sa
 bm25 ≈0.46 / cheap ≈0.557 / llm ≈0.65-0.67（judge 0.73）——与裁剪前冻结证据逐位一致。
 已裁脚本/模块的历史报告数字不受影响（产物固化于 bench/runs/，脚本留存 archive_retired/）。
 
+**回归复跑记录**（sample50 同冻结配置，`--answer llm --judge llm` 全旗帜）：
+
+| 日期 | 提交 | bm25（覆盖率/judge） | cheap | llm | ctest | 结论 |
+|---|---|---|---|---|---|---|
+| 2026-10-26 | 9a04b77（APK cheap 默认档+文档同步） | 0.521 / 0.68 | 0.604 / 0.74 | 0.750 / 0.72 | 14/15（test_bench=预存环境 UB，同基线） | 档位序 bm25<cheap<llm 保持，均不低于归档基线；绝对值上移为 uid/LLM 复跑噪声，本次改动不触 bench 路径 |
+
+复跑命令：`--dataset locomo --data bench/data/locomo10.json --question-ids
+bench/data/locomo_sample50.json --rerank <档> --entity-pass-threshold 0.5
+--rerank-guard 0.2 --answer llm --judge llm --concurrency 16 --cache-dir bench/cache`
+（cheap 档加 `--cheap-rerank bench/models/cheap_model.json`）。
+APK 验证：assembleDebug 通过，`libame_jni.so` 导出 `nativeLoadCheapModel`、
+APK 含 `assets/cheap_model.json`；真机 logcat 运行时确认待做。
+
 **APK 重排档（3.0 起）**：默认 **cheap**——`assets/cheap_model.json` 建 session 时注入
 JNI（`AmeEngine.loadCheapModel`），recall 在原生侧走 候选池60 → 11 特征逻辑重排 → topN，
 零 LLM、毫秒级；加载失败自动回退引擎原序（bm25 行为）。手动"深度重排"开关不变，
