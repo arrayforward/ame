@@ -29,7 +29,6 @@
 #include "ame/engine/engine.h"
 #include "ame/llm/components.h"
 #include "ame/llm/llm.h"
-#include "ame/mem/mem.h"
 
 using namespace ame;
 
@@ -39,10 +38,8 @@ namespace {
 struct Cli {
   BenchConfig cfg;
   std::string dataset, data;
-  std::string store = "graph";   // --store graph|lmem：存储后端（默认 graph=1.x Engine）
   int limit = 0;
   std::string dump_path;       // --dump：逐题结果 NDJSON 落盘路径
-  std::string cand_dump_path;  // --cand-dump：lmem 候选池全量 NDJSON 落盘路径（P3a miss 诊断）
   std::string build_lexicon;   // --build-lexicon：词频表路径（构建词典后退出）
   std::string validate_lexicon;  // --validate-lexicon：蒸馏词库 strong 流可互换校验（M2）
   std::string score_sims;        // --score-sims：词级近似 1-10 打分（第五轮 M3）
@@ -53,7 +50,6 @@ struct Cli {
   std::string save_graph;      // --save-graph PATH：摄入后整图（含档案）落 JSON（每 case 一个文件）
   std::string load_graph;      // --load-graph PATH：直接加载已摄入的图，跳过摄入/提取
   std::string feedback_dir;    // --feedback-dir PATH：M11 埋点+judge 信号回流 + M14 调优对比
-  std::string fb_exp;          // --fb-exp DIR：P2b 双 pass 反馈实验（仅 --store lmem；
                                // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
   std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
@@ -75,8 +71,6 @@ struct Cli {
   bool has_weights = false;    // --weights α,β,γ 覆盖融合权重
   double w_alpha = 0.5, w_beta = 0.3, w_gamma = 0.2;
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
-  int prox_window = 2;         // --prox-window N：lmem P3b 邻近加成窗口（0=禁用，默认 2）
-  bool expand_on = true;       // --no-expand：lmem P3b 共现联想扩散关闭
 };
 
 // parse_args 伪代码：键值扫描，未知键忽略；--abstain-categories 为逗号分隔整数列表。
@@ -87,7 +81,6 @@ Cli parse_args(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "--dataset") cli.dataset = next();
     else if (a == "--data") cli.data = next();
-    else if (a == "--store") cli.store = next();
     else if (a == "--limit") cli.limit = std::atoi(next().c_str());
     else if (a == "--k") cli.cfg.k = std::atoi(next().c_str());
     else if (a == "--abstain-threshold") cli.cfg.abstain_threshold = std::atof(next().c_str());
@@ -100,7 +93,6 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--config") cli.cfg.config_path = next();
     else if (a == "--out") cli.cfg.out_json = next();
     else if (a == "--dump") cli.dump_path = next();
-    else if (a == "--cand-dump") cli.cand_dump_path = next();
     else if (a == "--build-lexicon") cli.build_lexicon = next();
     else if (a == "--validate-lexicon") cli.validate_lexicon = next();
     else if (a == "--score-sims") cli.score_sims = next();
@@ -121,7 +113,6 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--save-graph") cli.save_graph = next();
     else if (a == "--load-graph") cli.load_graph = next();
     else if (a == "--feedback-dir") cli.feedback_dir = next();
-    else if (a == "--fb-exp") cli.fb_exp = next();
     else if (a == "--extractor-dict") cli.extractor_dict = next();
     else if (a == "--word-edges") cli.word_sim_path = next();
     else if (a == "--name-alias") cli.name_alias = next();
@@ -145,8 +136,6 @@ Cli parse_args(int argc, char** argv) {
       cli.cfg.final_beta = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
     }
-    else if (a == "--prox-window") cli.prox_window = std::atoi(next().c_str());
-    else if (a == "--no-expand") cli.expand_on = false;
     else if (a == "--weights") {  // α,β,γ 覆盖（M14 调优结果验证用）
       std::string v = next();
       std::sscanf(v.c_str(), "%lf,%lf,%lf", &cli.w_alpha, &cli.w_beta, &cli.w_gamma);
@@ -170,15 +159,11 @@ Cli parse_args(int argc, char** argv) {
 void usage() {
   std::fprintf(stderr,
                "用法: ame_bench --dataset locomo|longmemeval|beam --data <path>\n"
-               "      [--store graph|lmem]（默认 graph=1.x Engine；lmem=2.0 分层存储）\n"
                "      [--extractor rule|llm] [--answer baseline|llm] [--judge f1|llm]\n"
                "      [--limit N] [--k 10] [--concurrency 8] [--model deepseek-v4-flash]\n"
                "      [--cache-dir bench/cache] [--config bench/config/deepseek.local.json]\n"
                "      [--out report.json] [--abstain-threshold 0.15] [--abstain-categories 5]\n"
                "      [--dump results.ndjson]（逐题结果落盘，失败分析用）\n"
-               "      [--cand-dump cands.ndjson]（仅 lmem：候选池全量落盘，P3a miss 诊断用）\n"
-               "      [--fb-exp DIR]（仅 lmem：P2b 双 pass 反馈实验，pass1 判分→feedback 落盘\n"
-               "       →pass2 同题单只跑召回对比金标证据排序）\n"
                "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
                "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
@@ -387,38 +372,6 @@ int main(int argc, char** argv) {
   }
   if (cli.limit > 0 && (int)cases.size() > cli.limit) cases.resize(cli.limit);
 
-  // --store 校验 + lmem 下 1.x 专属开关明确忽略（设计 §10.3 双后端纪律）
-  if (cli.store != "graph" && cli.store != "lmem") {
-    std::fprintf(stderr, "未知存储后端: %s（仅支持 graph|lmem）\n", cli.store.c_str());
-    return 1;
-  }
-  if (cli.store == "lmem") {
-    std::string ignored;
-    auto mark = [&](const char* name, bool on) {
-      if (on) { if (!ignored.empty()) ignored += ","; ignored += name; }
-    };
-    mark("save-graph", !cli.save_graph.empty());
-    mark("load-graph", !cli.load_graph.empty());
-    mark("load-lexicon", !cli.load_lexicon.empty());
-    mark("extractor-dict", !cli.extractor_dict.empty());
-    mark("word-sim", !cli.word_sim_path.empty());
-    mark("name-alias", !cli.name_alias.empty());
-    mark("llm-rerank", cli.llm_rerank > 0);
-    mark("rerank", cli.cfg.rerank_mode != "bm25");
-    mark("entity-pass-threshold", cli.entity_pass >= 0.0);
-    mark("rerank-guard", cli.rerank_guard >= 0.0);
-    mark("final-alpha/beta", cli.has_final);
-    mark("feedback-dir", !cli.feedback_dir.empty());
-    mark("beam", cli.cfg.beam_width > 0);
-    mark("think-mode=ircot", cli.cfg.think_mode == "ircot");
-    mark("answer-mode=aggregate", cli.cfg.answer_mode_agg == "aggregate");
-    mark("weights", cli.has_weights);
-    if (!ignored.empty())
-      std::fprintf(stderr,
-                   "[lmem] 忽略 1.x 专属开关: %s（lmem 取证走 Mem.recall 统一通道）\n",
-                   ignored.c_str());
-  }
-
   // --question-ids：只评测指定题目（固定小样本 A/B 用）
   std::unordered_set<std::string> only_qids;
   if (!cli.question_ids.empty()) {
@@ -455,17 +408,10 @@ int main(int argc, char** argv) {
 
   // 步骤3：逐 case 摄入 + 离线取证；LLM 答题/判分请求先收集后批量发
   MetricAccumulator acc;
-  struct EvRef {  // P2b fb-exp：一条证据的来源定位（ref_obs + kind + 通道）
-    uint64_t ref_obs;
-    std::string source_kind;
-    std::string via;
-  };
   struct Pending {
     const BenchQuestion* q;
     AnswerResult base;               // baseline 结果（含证据）
     std::vector<std::string> ev_texts;
-    std::vector<EvRef> ev_refs;      // P2b fb-exp：逐证据来源（feedback 用，与 ev_texts 对齐）
-    std::string conv;                // P2b fb-exp：所属 case（conversation_id）
     std::string group;
     std::string llm_answer;
     bool llm_done = false;
@@ -473,8 +419,6 @@ int main(int argc, char** argv) {
   };
   std::vector<Pending> pendings;
   std::vector<std::unique_ptr<Engine>> engines;  // 保活到判分阶段（反馈回流用）
-  std::vector<std::unique_ptr<Mem>> lmem_keep;   // P2b fb-exp：lmem 保活到判分后 feedback
-  std::unordered_map<std::string, Mem*> lmem_by_conv;
   // 聚合题候选证据（case 循环内召回，引擎存活期收集）
   struct AggJob {
     int qi;
@@ -482,12 +426,6 @@ int main(int argc, char** argv) {
   };
   std::vector<AggJob> agg_jobs;
 
-  // P3a 诊断：lmem 候选池全量落盘（与正式取证同一 k_pool 口径）
-  FILE* cand_df = nullptr;
-  if (!cli.cand_dump_path.empty() && cli.store == "lmem")
-    cand_df = std::fopen(cli.cand_dump_path.c_str(), "w");
-  else if (!cli.cand_dump_path.empty())
-    std::fprintf(stderr, "[warn] --cand-dump 仅 --store lmem 生效，已忽略\n");
 
   for (auto& c : cases) {
     // --question-ids 固定样本提速：该 case 无任何被请求的问题 → 整个跳过（含摄入）。
@@ -497,68 +435,6 @@ int main(int argc, char** argv) {
       for (auto& q : c.questions)
         if (only_qids.count(q.id)) { any = true; break; }
       if (!any) continue;
-    }
-    // --store lmem：2.0 分层存储后端（M15–M19）。每 case 独立内存态 Mem，
-    // owner=conversation_id；取证/证据回溯经 LmemStore（store.cpp），
-    // LLM 答题/判分/报表与 graph 共用下游代码（同缓存同 judge 口径）。
-    // P2b --fb-exp：Mem 落盘到 DIR/<conv>（观测+事实+可靠性分片），
-    // 判分后 feedback 生效 → pass2 同目录重开（replay 恢复）只跑召回对比排序。
-    if (cli.store == "lmem") {
-      const std::string fb_root = cli.fb_exp.empty() ? "" : cli.fb_exp + "/" + c.conversation_id;
-      auto mem_up = std::make_unique<Mem>(fb_root);
-      Mem* mem_ptr = mem_up.get();
-      // P3b 通道开关（--prox-window/--no-expand；P3a 诊断 P2 口径复现用）
-      mem_ptr->view().set_proximity_window(cli.prox_window);
-      mem_ptr->view().set_expand_enabled(cli.expand_on);
-      LmemStore ls(mem_ptr, c.conversation_id);
-      IngestStats st = ls.ingest_case(c);
-      if (!cli.fb_exp.empty()) {
-        lmem_keep.push_back(std::move(mem_up));
-        lmem_by_conv[c.conversation_id] = mem_ptr;
-      }
-      std::fprintf(stderr, "[case %s] events=%d entities=%d keywords=%d questions=%zu\n",
-                   c.conversation_id.c_str(), st.events, st.entities, st.keywords,
-                   c.questions.size());
-      for (auto& q : c.questions) {
-        if (!only_qids.empty() && !only_qids.count(q.id)) continue;
-        if (q.category > 0) {  // LoCoMo：对抗题类别判定与 graph 同口径
-          q.unanswerable = false;
-          for (int cat : cli.cfg.abstention_categories)
-            if (q.category == cat) q.unanswerable = true;
-        }
-        Pending p;
-        p.q = &q;
-        p.group = q.qtype;
-        p.eng_idx = 0;  // 无引擎反馈回流（feedback-dir 为 1.x 专属，已在上方忽略）
-        p.conv = c.conversation_id;  // P2b fb-exp：pass2 按 case 重开 Mem 时对齐
-        StoreAnswer sa = ls.answer_question(q, cli.cfg);
-        p.base = std::move(sa.result);
-        if (cand_df) {  // P3a：候选池全量（终排前，视图序 rank 从 1 计）
-          Json j = Json::object();
-          j["question_id"] = Json::string(q.id);
-          j["category"] = Json::number(q.category);
-          Json cands = Json::array();
-          for (size_t ci = 0; ci < sa.candidates.size(); ++ci) {
-            Json cj = Json::object();
-            cj["rank"] = Json::number((double)ci + 1);
-            cj["ref_obs"] = Json::number((double)sa.candidates[ci].ref_obs);
-            cj["dia_id"] = Json::string(sa.candidates[ci].dia_id);
-            cj["via"] = Json::string(sa.candidates[ci].via);
-            cj["score"] = Json::number(sa.candidates[ci].score);
-            cands.push(std::move(cj));
-          }
-          j["candidates"] = std::move(cands);
-          std::string line = j.dump();
-          std::fwrite(line.data(), 1, line.size(), cand_df);
-          std::fputc('\n', cand_df);
-        }
-        for (auto& ev : sa.evidence) {
-          p.ev_refs.push_back({ev.ref_obs, ev.source_kind, ev.via});  // P2b 反馈定位
-          p.ev_texts.push_back(std::move(ev.text));
-        }
-        pendings.push_back(std::move(p));
-      }
-      continue;
     }
     // 跨 case 隔离；--feedback-dir 启用 M11/M14（每 case 独立目录）。
     // 注意：只有启用反馈时才保活 Engine（判分阶段回流用）；否则每 case 用完即销毁，
@@ -884,8 +760,7 @@ int main(int argc, char** argv) {
     acc.add(p.group, *p.q, r, judge_scores[i]);
     // M11 反馈回流：judge 结果作为监督信号（选中/忽略）落 JSONL；
     // 实体/think 通道绕过 recall 的题（query_id==0）补记 log_query。
-    // 仅 graph 后端：lmem 的反馈闭环走 --fb-exp（P2b，下方双 pass 块），两者不混。
-    if (!cli.feedback_dir.empty() && cli.store == "graph" && judge_scores[i] >= 0) {
+    if (!cli.feedback_dir.empty() && judge_scores[i] >= 0) {
       long qid = p.base.query_id;
       if (qid == 0) qid = engines[p.eng_idx]->log_query(p.q->question,
                                                         p.base.evidence_uids);
@@ -897,77 +772,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- P2b 双 pass 反馈实验（仅 --store lmem + --fb-exp）----
-  // pass1 = 上方正常答题判分；此处按 1.x 语义回流（judge≥1 → 正反馈，否则负反馈，
-  // 作用于该题 top-1 证据的来源 kind），reliability 立即落盘 reliability.json；
-  // pass2 = 同目录重开 Mem（replay 恢复观测/事实/可靠性），同题单只跑召回
-  // （零 LLM 调用——本块在全部 LLM 阶段之后，不触碰 client），对比金标证据
-  // 在 pass1/pass2 证据序中的首位命中 rank（上升/不变/下降）。
-  std::vector<int> fb_rank1(pendings.size(), -1), fb_rank2(pendings.size(), -1);
-  if (cli.store == "lmem" && !cli.fb_exp.empty()) {
-    auto gold_rank = [](const AnswerResult& r, const BenchQuestion& q) -> int {
-      for (size_t t = 0; t < r.evidence_dia_ids.size(); ++t) {
-        const std::string& e = r.evidence_dia_ids[t];
-        if (e.rfind("S:", 0) == 0) continue;  // 会话标记非 dia_id
-        for (auto& g : q.evidence_dia_ids)
-          if (e == g) return (int)t + 1;
-      }
-      return 0;  // 金标未进证据序
-    };
-    std::unordered_map<std::string, size_t> pend_idx;
-    for (size_t i = 0; i < pendings.size(); ++i) pend_idx[pendings[i].q->id] = i;
-
-    // pass1 → feedback 落盘
-    size_t fb_applied = 0;
-    for (size_t i = 0; i < pendings.size(); ++i) {
-      if (judge_scores[i] < 0) continue;  // 无判分不回流（同 1.x judge>=0 门槛）
-      Pending& p = pendings[i];
-      auto it = lmem_by_conv.find(p.conv);
-      if (it == lmem_by_conv.end() || p.ev_refs.empty()) continue;
-      EvidenceItem ev;
-      ev.ref_obs = p.ev_refs[0].ref_obs;
-      ev.source_kind = p.ev_refs[0].source_kind;
-      ev.via = p.ev_refs[0].via;
-      if (it->second->feedback(p.conv, ev, judge_scores[i] >= 1.0) == Err::Ok) ++fb_applied;
-    }
-    std::fprintf(stderr, "[fbexp] pass1 判分 %zu 题，反馈落盘 %zu 条\n", pendings.size(),
-                 fb_applied);
-
-    // pass2：同题单只跑召回，逐题对比金标 rank
-    int up = 0, same = 0, down = 0, nogold = 0;
-    for (auto& c : cases) {
-      if (!lmem_by_conv.count(c.conversation_id)) continue;
-      Mem m2(cli.fb_exp + "/" + c.conversation_id);  // 持久化分片 replay 恢复
-      LmemStore ls2(&m2, c.conversation_id);
-      for (auto& q : c.questions) {
-        if (!only_qids.empty() && !only_qids.count(q.id)) continue;
-        auto pi = pend_idx.find(q.id);
-        if (pi == pend_idx.end()) continue;
-        StoreAnswer sa2 = ls2.answer_question(q, cli.cfg);  // 只召回，零 LLM
-        const int r1 = gold_rank(pendings[pi->second].base, q);
-        const int r2 = gold_rank(sa2.result, q);
-        fb_rank1[pi->second] = r1;
-        fb_rank2[pi->second] = r2;
-        const char* dir = "nogold";
-        if (r1 > 0 && r2 > 0) {
-          if (r2 < r1) { ++up; dir = "up"; }
-          else if (r2 > r1) { ++down; dir = "down"; }
-          else { ++same; dir = "same"; }
-        } else if (r2 > 0) {
-          ++up; dir = "up";  // pass1 未命中 → pass2 命中，记上升
-        } else {
-          ++nogold;
-        }
-        std::printf("[fbexp] %s %-8s gold_rank pass1=%d pass2=%d %s\n",
-                    c.conversation_id.c_str(), q.id.c_str(), r1, r2, dir);
-      }
-    }
-    std::printf("[fbexp-summary] questions=%zu up=%d same=%d down=%d nogold=%d\n",
-                pendings.size(), up, same, down, nogold);
-  }
-
   // M14 学习闭环：用回流 triples 离线调 α/β/γ，打印调优前后对比（离线复评 baseline）
-  if (!cli.feedback_dir.empty() && cli.store == "graph") {
+  if (!cli.feedback_dir.empty()) {
     for (size_t ei = 0; ei < engines.size(); ++ei) {
       Engine& e = *engines[ei];
       auto w0 = e.reranker().weights();
@@ -1009,10 +815,6 @@ int main(int argc, char** argv) {
         Json gold_ev = Json::array();
         for (auto& e : p.q->evidence_dia_ids) gold_ev.push(Json::string(e));
         j["gold_evidence"] = std::move(gold_ev);
-        if (fb_rank1[i] >= 0) {  // P2b fb-exp：双 pass 金标 rank 对照
-          j["fb_rank_pass1"] = Json::number((double)fb_rank1[i]);
-          j["fb_rank_pass2"] = Json::number((double)fb_rank2[i]);
-        }
         std::string line = j.dump();
         std::fwrite(line.data(), 1, line.size(), df);
         std::fputc('\n', df);
@@ -1020,10 +822,6 @@ int main(int argc, char** argv) {
       std::fclose(df);
       std::fprintf(stderr, "[dump] %s (%zu 题)\n", cli.dump_path.c_str(), pendings.size());
     }
-  }
-  if (cand_df) {
-    std::fclose(cand_df);
-    std::fprintf(stderr, "[cand-dump] %s\n", cli.cand_dump_path.c_str());
   }
 
   // 步骤6：报表输出（控制台 + 可选 JSON）

@@ -6,7 +6,7 @@ add_library(ame_bench STATIC
   src/store.cpp
 )
 target_include_directories(ame_bench PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(ame_bench PUBLIC ame_engine ame_time ame_mem ame_llm)
+target_link_libraries(ame_bench PUBLIC ame_engine ame_time ame_llm)
 
 add_executable(ame_bench_cli cli/main.cpp)
 target_link_libraries(ame_bench_cli PRIVATE ame_bench ame_llm)

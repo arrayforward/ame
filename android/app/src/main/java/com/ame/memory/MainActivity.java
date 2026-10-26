@@ -140,10 +140,7 @@ public class MainActivity extends AppCompatActivity {
                 Log.i(MemoryOrchestrator.TAG, "PDF 解析完成: 文本" + plan.text.length()
                         + "字 图片" + plan.images.size() + "张");
                 // use{} → try-with-resources（graph 后端快照兜底落盘由 JNI close 负责）
-                // 双后端：与目标会话的引擎同后端（lmem 时方案块进观测层，防数据分裂）
-                try (MemEngine eng = "lmem".equals(BuildConfig.MEM_STORE)
-                        ? LmemEngine.create(dir.getAbsolutePath(), s.id)
-                        : AmeEngine.create(dir.getAbsolutePath())) {
+                                try (AmeEngine eng = AmeEngine.create(dir.getAbsolutePath())) {
                     if (eng instanceof AmeEngine)
                         KeywordDict.ensureLoaded(this, (AmeEngine) eng);  // 分块提取依赖词典
                     long base = System.currentTimeMillis() / 1000;

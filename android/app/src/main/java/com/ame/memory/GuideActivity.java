@@ -60,7 +60,7 @@ public class GuideActivity extends AppCompatActivity {
     private static final int PLAN_DIALOG_MAX_IMGS = 20;
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private MemEngine engine;
+    private AmeEngine engine;
     private MemoryOrchestrator orchestrator;
     private SessionStore store;
     private String sessionId;
@@ -123,10 +123,7 @@ public class GuideActivity extends AppCompatActivity {
         final String guideTextF = guideText;
         final String sessionNameF = sessionName;   // lambda 捕获需 effectively final
         io.execute(() -> {
-            // 双后端：MEM_STORE=lmem 走 2.0 分层记忆（自动迁移 1.x 快照），默认 graph
-            MemEngine eng = "lmem".equals(BuildConfig.MEM_STORE)
-                    ? LmemEngine.create(sessionDir.getAbsolutePath(), sessionId)
-                    : AmeEngine.create(sessionDir.getAbsolutePath());
+            AmeEngine eng = AmeEngine.create(sessionDir.getAbsolutePath());
             if (eng instanceof AmeEngine) KeywordDict.ensureLoaded(this, (AmeEngine) eng);
             runOnUiThread(() -> {
                 engine = eng;

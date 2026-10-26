@@ -18,13 +18,12 @@ endif()
 set(AME_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
 # 引擎侧模块（与桌面端共用同一份源码；顺序无关，CMake 自动按依赖排序）
-# 1.x 模块 + 2.0 分层记忆模块（M15–M19，lmem 后端；bench/llm/tests/demo 不进 Android）
+# 1.x 模块（bench/llm/tests/demo 不进 Android；2.0 分层记忆 M15–M19 已随 3.0 刀1 裁剪）
 set(AME_MODULES core storage time vector extractor entity keyword
-                graph_writer seed diffusion rerank thinker feedback learning engine
-                memobs memfact memindex memview mem)
+                graph_writer seed diffusion rerank thinker feedback learning engine)
 foreach(m ${AME_MODULES})
   add_subdirectory(${AME_ROOT}/${m} ${CMAKE_BINARY_DIR}/ame/${m})
 endforeach()
 
-add_library(ame_jni SHARED ame_jni.cpp mem_jni.cpp)
-target_link_libraries(ame_jni PRIVATE ame_engine ame_mem android log)
+add_library(ame_jni SHARED ame_jni.cpp)
+target_link_libraries(ame_jni PRIVATE ame_engine android log)

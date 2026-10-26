@@ -13,7 +13,6 @@
 #include "ame/bench/store.h"
 #include "ame/engine/engine.h"
 #include "ame/llm/llm.h"
-#include "ame/mem/mem.h"
 #include "test_util.hpp"
 
 using namespace ame;
@@ -399,10 +398,8 @@ static void test_apply_name_aliases() {
   }
   CHECK(apply_name_aliases(e, bad, nullptr) == Err::ParseError);
 }
-
-// 双后端存储抽象（--store graph|lmem，设计 §10.3）：同一 case 经 IStore 摄入取证，
-// 两后端证据均可回溯 dia_id（graph 自事件 attrs，lmem 自观测 meta.ref_obs），
-// GraphStore 结果与直接 answer() 逐题一致（适配器零行为差）。
+// 存储抽象（3.0 简化版：仅 graph 后端）：GraphStore 与直接 answer() 逐题一致
+// （适配器零行为差），证据 dia_id 取自事件 attrs。
 static void test_store_adapters() {
   auto loco = load_locomo(std::string(kFixtureDir) + "/locomo_mini.json");
   const BenchCase& c = loco[0];
@@ -422,18 +419,8 @@ static void test_store_adapters() {
   for (auto& ev : ra.evidence)
     if (!ev.dia_id.empty()) graph_dia = true;
   CHECK(graph_dia);  // graph 证据 dia_id 从事件 attrs 取
-
-  Mem m;
-  LmemStore ls(&m, c.conversation_id);
-  CHECK(ls.ingest_case(c).events == 9);
-  auto rb = ls.answer_question(q, cfg);
-  CHECK(!rb.result.evidence_dia_ids.empty());
-  CHECK(rb.evidence.size() == rb.result.evidence_uids.size());
-  bool lmem_dia = false;
-  for (auto& ev : rb.evidence)
-    if (!ev.dia_id.empty()) lmem_dia = true;
-  CHECK(lmem_dia);  // lmem 证据 dia_id 经 ref_obs → 观测 meta 回溯
 }
+
 
 // LLM 重排响应解析（容错）：编号序/去重/越界跳过/NONE/散文夹带/截 k
 static void test_llm_rerank_parse() {

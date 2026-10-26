@@ -4,11 +4,11 @@
  *   声明在本类中（JNI 符号名为 Java_com_ame_memory_AmeEngine_*），
  *   实例方法持句柄做薄壳封装，close() 释放原生引擎（含快照兜底落盘）。
  * 依赖关系：libame_jni（CMake 外源构建，见 ame_jni/CMakeLists.txt）；
- *   实现 MemEngine 接口（与 LmemEngine 双后端同形）。
+ *   3.0 简化版：唯一存储后端（2.0 lmem 已裁剪，dev-3.0 刀1）。
  */
 package com.ame.memory;
 
-public final class AmeEngine implements MemEngine {
+public final class AmeEngine implements AutoCloseable {
 
     static {
         System.loadLibrary("ame_jni");

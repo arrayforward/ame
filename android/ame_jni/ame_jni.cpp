@@ -10,7 +10,7 @@
  *   快照持久化：save/load 显式导出/导入 per-session graph.json。
  * 关键算法/数据结构：句柄表 std::map<jlong, unique_ptr<Engine>> + 全局锁
  *   （ame_jni::g_mu，与 Mem 句柄表共用）；handle 单调递增值（不用裸指针值，防悬空复用）。
- *   MUTF-8 转换与句柄序号源在 jni_util.hpp（与 2.0 lmem 桥共用）。
+ *   MUTF-8 转换与句柄序号源在 jni_util.hpp。
  * 依赖关系：ame/engine/engine.h（六动词外观）、jni_util.hpp；jni.h / android log。
  */
 #include <jni.h>

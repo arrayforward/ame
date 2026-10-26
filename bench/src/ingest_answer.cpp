@@ -117,7 +117,7 @@ static std::vector<std::string> content_words(const std::string& question) {
 }
 
 // content_scores_for_texts：对一组候选文本返回每个的内容词 BM25-lite 得分
-//   （store.h 导出：lmem 后端终排与 1.x answer() 步骤4 共用同一公式；
+//   （store.h 导出：answer() 步骤4 与同公式复用方共用；
 //   df/idf 在候选集内统计 log(1+N/(1+df))，得分 = Σ idf·tf/(tf+1) 按 idf_sum 归一）。
 std::vector<double> content_scores_for_texts(const std::string& question,
                                              const std::vector<std::string>& texts) {
