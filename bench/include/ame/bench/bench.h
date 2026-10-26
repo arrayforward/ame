@@ -82,7 +82,6 @@ struct BenchConfig {
   // ---- 第六轮终局架构：统一 graded 边表（--word-edges 开启，默认空=历史行为）----
   // 非空时 M5 词法通道唯一逻辑：命中分=max(1.0, 最佳边分)（词形铸边 0.9/0.95、
   // 蒸馏边 0.3-1.0、反义弱边 0.35），m 按 ≥0.5 计；旁路 expand_of 两档。
-  const class WordEdgeTable* word_edges = nullptr;
 
   // ---- 句级语义 spike：LLM 重排通道（--llm-rerank N，默认 0=关=历史行为）----
   // 标准管道证据终排（内容词 BM25，含 think 并入）截 top-k 之前：取终排序 top-N
@@ -175,9 +174,6 @@ struct IngestStats {
 IngestStats ingest(Engine& engine, const BenchCase& c);
 // llm 提取器版本：非空 extractor 时按会话批量提取后落库，失败自动回退规则提取
 IngestStats ingest(Engine& engine, const BenchCase& c, IExtractor* extractor);
-
-// ---- 词典灌库：lexicon.json → M3 别名表 + RELATED 边（实现见 lexicon_apply.cpp）----
-Err apply_lexicon(Engine& engine, const std::string& path, int* applied = nullptr);
 
 // ---- 姓名别名表灌库：names_zh.json → M3 别名表 + M1 提取词面 + M2 实体/Alias
 // （人名/专名归一域，严格等价；须在摄入前调用，实现见 lexicon_apply.cpp）----

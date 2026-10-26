@@ -185,119 +185,6 @@ static void test_snapshot_with_slots() {
     CHECK(a.events[i].event->uid == b.events[i].event->uid);
 }
 
-// 中文词林灌库验证：同义归一命中 + 对立边抑制 + 幂等（转换产物 lexicon_zh.json）
-static void test_chinese_lexicon() {
-  std::string lex = std::string(AME_FIXTURE_DIR) + "/../data/lexicon_zh.json";
-  if (!std::filesystem::exists(lex)) {
-    std::printf("SKIP test_chinese_lexicon: %s 不存在\n", lex.c_str());
-    return;
-  }
-  Engine e;
-  auto r1 = e.remember("我昨晚又睡不着了");
-  auto r2 = e.remember("老张今天很愉快");
-  auto r3 = e.remember("老王昨天很悲伤");
-  CHECK(r1.code == Err::Ok && r2.code == Err::Ok && r3.code == Err::Ok);
-
-  int applied = 0;
-  CHECK(apply_lexicon(e, lex, &applied) == Err::Ok);
-  CHECK(applied > 0);
-  // 词林同义归一：愉快 → 开心（同义组首词方向之一；以实际灌库结果为准的双向验证）
-  CHECK(e.keywords().normalize("愉快") == "开心" ||
-        e.keywords().normalize("开心") == "愉快" ||
-        e.keywords().normalize("高兴") == "开心" ||
-        e.keywords().normalize("愉快") == "高兴");
-  // 内置归一不受大词典影响：睡不着 → 失眠
-  CHECK(e.keywords().normalize("睡不着") == "失眠");
-  // 查询 "失眠" 命中 "睡不着" 事件
-  SeedQuery sq;
-  sq.text = "失眠";
-  auto rr = e.recall(sq, {}, 2, 10, false);
-  bool hit_insomnia = false;
-  for (auto& se : rr.events)
-    if (se.event->uid == r1.event_id) hit_insomnia = true;
-  CHECK(hit_insomnia);
-  // 对立抑制：查询 "开心"，愉快事件应排在悲伤事件之前（对立边系数最低）
-  SeedQuery sq2;
-  sq2.text = "开心";
-  auto rr2 = e.recall(sq2, {}, 2, 10, false);
-  int pos_happy = -1, pos_sad = -1;
-  for (size_t i = 0; i < rr2.events.size(); ++i) {
-    if (rr2.events[i].event->uid == r2.event_id) pos_happy = (int)i;
-    if (rr2.events[i].event->uid == r3.event_id) pos_sad = (int)i;
-  }
-  CHECK(pos_happy >= 0);
-  if (pos_sad >= 0) CHECK(pos_happy < pos_sad);
-  // 灌库幂等：重复 apply 边数不变
-  size_t edges1 = e.storage().edge_count();
-  CHECK(apply_lexicon(e, lex, nullptr) == Err::Ok);
-  CHECK(e.storage().edge_count() == edges1);
-  // 多文件拼接：lexicon_zh2（箭头对同义词典）并集 + 幂等
-  std::string lex2 = std::string(AME_FIXTURE_DIR) + "/../data/lexicon_zh2.json";
-  if (std::filesystem::exists(lex2)) {
-    CHECK(apply_lexicon(e, lex2, nullptr) == Err::Ok);
-    CHECK(e.keywords().normalize("百度") == "baidu");  // 箭头对 baidu→百度 反向归一
-    size_t edges2 = e.storage().edge_count();
-    CHECK(apply_lexicon(e, lex2, nullptr) == Err::Ok);
-    CHECK(e.storage().edge_count() == edges2);
-  }
-  // 三本拼接：+ lexicon_hf（高频蒸馏），幂等 + 内置保护仍生效
-  std::string lex3 = std::string(AME_FIXTURE_DIR) + "/../data/lexicon_hf.json";
-  if (std::filesystem::exists(lex3)) {
-    CHECK(apply_lexicon(e, lex3, nullptr) == Err::Ok);
-    size_t edges3 = e.storage().edge_count();
-    CHECK(apply_lexicon(e, lex3, nullptr) == Err::Ok);  // 幂等
-    CHECK(e.storage().edge_count() == edges3);
-    CHECK(e.keywords().normalize("睡不着") == "失眠");  // 内置标准词不被改写
-  }
-}
-
-// 灌库源区分（第六轮修订）：distilled 源彻底旁路等价归一（graded 边表替代，§14），
-// 无 source 字段的源维持 alias_ok 双向守卫（行为逐比特不变）。
-static void test_apply_lexicon_source_guard() {
-  const char* distilled = "/tmp/ame_test_lex_distilled.json";
-  const char* plain = "/tmp/ame_test_lex_plain.json";
-  // like/love 互为主词但 strong 不互指：wordnet 式守卫会拒 like->love，蒸馏源应放行
-  const char* body = R"({"entries":[
-    {"word":"like","syn_strong":["love","prefer"],"syn_near":[],"antonyms":[]},
-    {"word":"love","syn_strong":["adore"],"syn_near":[],"antonyms":[]}]})";
-  {
-    std::ofstream f(distilled);
-    f << std::string("{\"source\":\"distilled\",") << (body + 1);
-  }
-  { std::ofstream f(plain); f << body; }
-  // distilled：第六轮起不写别名表（词级语义走 WordEdgeTable），normalize 原样返回
-  {
-    Engine e;
-    int applied = 0;
-    CHECK(apply_lexicon(e, distilled, &applied) == Err::Ok);
-    CHECK(e.keywords().normalize("love") == "love");
-    CHECK(e.keywords().normalize("prefer") == "prefer");
-  }
-  // 无 source 字段：守卫保持（love 是主词且 strong 不含 like → 拒）
-  {
-    Engine e;
-    int applied = 0;
-    CHECK(apply_lexicon(e, plain, &applied) == Err::Ok);
-    CHECK(e.keywords().normalize("love") == "love");   // like->love 被拒
-    CHECK(e.keywords().normalize("prefer") == "like"); // 非主词直接归并
-  }
-  // 防环：A<->B 双向 strong 互指在 distilled 源下也不得产生互换归一
-  {
-    const char* cyc = "/tmp/ame_test_lex_cyc.json";
-    {
-      std::ofstream f(cyc);
-      f << "{\"source\":\"distilled\",\"entries\":["
-        << "{\"word\":\"alpha\",\"syn_strong\":[\"beta\"],\"syn_near\":[],\"antonyms\":[]},"
-        << "{\"word\":\"beta\",\"syn_strong\":[\"alpha\"],\"syn_near\":[],\"antonyms\":[]}"
-        << "]}";
-    }
-    Engine e;
-    CHECK(apply_lexicon(e, cyc, nullptr) == Err::Ok);
-    // 不允许 normalize(alpha)==beta 且 normalize(beta)==alpha 的互换
-    CHECK(!(e.keywords().normalize("alpha") == "beta" &&
-            e.keywords().normalize("beta") == "alpha"));
-  }
-}
 
 // 会话日期解析：LoCoMo 月名格式（"1:56 pm on 8 May, 2023"）+ 数字格式回归
 //（月名缺失时时分数字曾被误判为月/日 → 全部会话落入合成时间，cat2 时序题全灭的根因）。
@@ -846,8 +733,6 @@ int main() {
   test_knowledge_update();
   test_order_events();
   test_snapshot_with_slots();
-  test_chinese_lexicon();
-  test_apply_lexicon_source_guard();
   test_apply_name_aliases();
   test_evidence_content_rerank();
   test_llm_rerank_parse();

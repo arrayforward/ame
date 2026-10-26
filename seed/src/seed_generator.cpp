@@ -80,109 +80,6 @@ static void mint_inflections(const std::string& w,
       0.9f);
 }
 
-// WordEdgeTable::load：蒸馏 sim 边 {"sims": {word: {word2: score}}}（行降序；
-// 消费方依赖降序做 0.3 下限截断）。撞词（多源同对）由 add_edge 取 max。
-static void sort_row(std::vector<std::pair<std::string, float>>& row) {
-  std::sort(row.begin(), row.end(), [](auto& a, auto& b) { return a.second > b.second; });
-}
-
-void WordEdgeTable::add_edge(const std::string& a, const std::string& b, float sc) {
-  if (sc <= 0.0f || a.empty() || b.empty() || a == b) return;
-  auto& row = rows_[a];
-  for (auto& [v, s2] : row)
-    if (v == b) {
-      if (sc > s2) s2 = sc;  // 撞词取 max（三类边共表语义）
-      return;
-    }
-  row.emplace_back(b, sc);
-  ++edges_;
-}
-
-bool WordEdgeTable::load(const std::string& path) {
-  std::ifstream f(path);
-  if (!f) return false;
-  std::stringstream ss;
-  ss << f.rdbuf();
-  bool ok = false;
-  Json root = Json::parse(ss.str(), &ok);
-  if (!ok) return false;
-  const Json* sims = root.find("sims");
-  if (!sims || sims->kind != Json::Obj) return false;
-  for (auto& [w, rowj] : sims->obj) {
-    if (rowj.kind != Json::Obj) continue;
-    for (auto& [v, scj] : rowj.obj) add_edge(w, v, (float)scj.as_num(0.0));
-  }
-  for (auto& [w, row] : rows_) sort_row(row);
-  return true;
-}
-
-// load_antonyms：蒸馏词库 antonyms 流 ×0.35 折入（反义弱联想档）。幂等（撞词取 max）。
-bool WordEdgeTable::load_antonyms(const std::string& lexicon_path) {
-  std::ifstream f(lexicon_path);
-  if (!f) return false;
-  std::stringstream ss;
-  ss << f.rdbuf();
-  bool ok = false;
-  Json root = Json::parse(ss.str(), &ok);
-  if (!ok) return false;
-  const Json* entries = root.find("entries");
-  if (!entries) return false;
-  for (auto& e : entries->arr) {
-    const Json* w = e.find("word");
-    const Json* ant = e.find("antonyms");
-    if (!w || !ant) continue;
-    for (auto& s : ant->arr) add_edge(w->as_str(), s.as_str(), 0.35f);
-  }
-  for (auto& [w, row] :rows_) sort_row(row);
-  return true;
-}
-
-// sim(a,b)：存表边双向查 + 现场铸边（a 家族含 b 或 b 家族含 a），取 max。
-float WordEdgeTable::sim(const std::string& a, const std::string& b) const {
-  float best = 0.0f;
-  auto it = rows_.find(a);
-  if (it != rows_.end())
-    for (auto& [v, sc] : it->second)
-      if (v == b && sc > best) best = sc;
-  auto jt = rows_.find(b);
-  if (jt != rows_.end())
-    for (auto& [v, sc] : jt->second)
-      if (v == a && sc > best) best = sc;
-  if (best >= 0.95f) return best;  // 不可能被铸边超越
-  std::vector<std::pair<std::string, float>> fam;
-  mint_inflections(a, fam);
-  for (auto& [v, sc] : fam)
-    if (v == b && sc > best) best = sc;
-  if (best >= 0.95f) return best;
-  fam.clear();
-  mint_inflections(b, fam);
-  for (auto& [v, sc] : fam)
-    if (v == a && sc > best) best = sc;
-  return best;
-}
-
-// edges_of(w)：存表行 ∪ 现场铸造的词形家族，按 score 降序合并（撞词取 max）。
-std::vector<std::pair<std::string, float>> WordEdgeTable::edges_of(
-    const std::string& w) const {
-  std::vector<std::pair<std::string, float>> out;
-  auto it = rows_.find(w);
-  if (it != rows_.end()) out = it->second;
-  std::vector<std::pair<std::string, float>> fam;
-  mint_inflections(w, fam);
-  for (auto& [v, sc] : fam) {
-    bool dup = false;
-    for (auto& [v2, sc2] : out)
-      if (v2 == v) {
-        if (sc > sc2) sc2 = sc;
-        dup = true;
-        break;
-      }
-    if (!dup) out.emplace_back(v, sc);
-  }
-  sort_row(out);
-  return out;
-}
-
 // 构造函数：保存 M9 存储、M13 向量服务、M3 关键词管理器的引用，M1 提取器可为空
 SeedGenerator::SeedGenerator(Storage& storage, VectorService& vec, KeywordManager& kw,
                              IExtractor* extractor)
@@ -327,23 +224,8 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
         //   默认（无条件）：每个内容词经 M3 反向别名取 ≤3 个同义词形，×0.6 打折；
         //   条件归一：有直接命中（关键词节点或事件词面 df>0）保持原词；人名不扩展；
         //   无命中 → strong 别名 ×0.6，无 strong 再降级 syn_near ×0.4（≤3 个）。
-        // 第六轮终局：WordEdgeTable 非空时整段旁路（统一 graded 边表，单边消费），
-        // 词形等价不再走 normalize 改写，由 edges_of 现场铸 0.9/0.95 分边承载。
-        const bool use_sim = q.word_edges != nullptr;
-        // tok_best：事件词 -> (最佳命中分, 所属查询词)；边表路径预计算（跨查询词取 max）。
-        // 预注册下限 0.3：LLM 1-3/10 分（仅弱相关）不触发，防高频假阳性。
-        std::unordered_map<std::string, std::pair<double, std::string>> tok_best;
         std::unordered_map<std::string, std::pair<std::string, double>> expand_of;  // 扩展词 -> (原词, 折扣)
-        if (use_sim) {
-          for (auto& w : qcontent) {
-            // 查询侧：词以小写原词查表（词形家族由 edges_of 现场铸边覆盖）
-            for (auto& [v, sc] : q.word_edges->edges_of(w)) {
-              if (sc < 0.3) break;  // 行按 score 降序，首个 <0.3 即截断
-              auto& tb = tok_best[v];
-              if (sc > tb.first) tb = {(double)sc, w};
-            }
-          }
-        } else {
+        {
           for (auto& w : qcontent) {
             // R2 查询侧：查询词先过 M3 归一（词干+别名）， loves→love 后取 love 的别名组，
             // 词形变化（loves/loved）作为别名精确匹配事件词面
@@ -381,7 +263,6 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
           idf[v] = std::log(1.0 + (double)events.size() / (1.0 + df[v]));
         std::vector<std::pair<double, std::string>> scored;  // (weight, event uid)
         for (size_t i = 0; i < events.size(); ++i) {
-          if (!use_sim) {
             // ---- 历史路径（word_edges 为空 = 行为逐行不变）----
             int m = 0;
             bool rare_hit = false;
@@ -402,35 +283,6 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
               double w = 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0);
               scored.emplace_back(w, events[i]->uid);
             }
-            continue;
-          }
-          // ---- 软匹配路径（第五轮 pivot）：命中分 = max(直接 1.0, sim(q,v)) ----
-          // hit：查询词 -> (最佳命中分, 命中词元)。预注册 m 定义：命中分 ≥0.5 的
-          // 查询词计一个内容词命中；s = Σ idf[w]×命中分（每查询词取最佳词元，防重复计）。
-          std::unordered_map<std::string, std::pair<double, std::string>> hit;
-          for (auto& w : qcontent)
-            if (etoks[i].count(w)) hit[w] = {1.0, w};
-          for (auto& t : etoks[i]) {
-            if (qcontent.count(t)) continue;  // 直接命中已计（1.0 即上限）
-            auto it = tok_best.find(t);
-            if (it == tok_best.end()) continue;
-            auto& h = hit[it->second.second];
-            if (it->second.first > h.first) h = it->second;
-          }
-          int m = 0;
-          bool rare_hit = false;
-          double s = 0;
-          for (auto& [w2, h] : hit) {
-            s += h.first * idf[w2];
-            if (h.first >= 0.5) {
-              ++m;
-              if (h.second.size() >= 6) rare_hit = true;
-            }
-          }
-          if (m >= 2 || (m == 1 && rare_hit)) {
-            double w = 0.3 + 0.7 * (idf_sum > 0 ? s / idf_sum : 0);
-            scored.emplace_back(w, events[i]->uid);
-          }
         }
         std::sort(scored.begin(), scored.end(), std::greater<>());
         for (size_t i = 0; i < scored.size() && i < (size_t)q.lex_topk; ++i)

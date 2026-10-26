@@ -1,10 +1,9 @@
 /*
- * 所属模块：bench 基准适配层——词典灌库（lexicon apply）。
- * 本文件主体思路：读取词典蒸馏产物 lexicon.json，灌入引擎：
- *   synonyms → M3 别名归一表（查询侧与写入侧词形对齐，"painting" 命中 "paint"）；
- *   antonyms → RELATED{对立} 边（系数 0.5 在 core，防反义被当强联想）；
- *   related 强关联（score>0.8）→ RELATED{相似} 边；节点不存在的词跳过（宽容）。
- * 关键算法/数据结构：无复杂算法；core JSON 解析。
+ * 所属模块：bench 基准适配层——姓名别名表灌库（3.0 刀2：apply_lexicon 同义/近义/
+ *   反义灌库已裁——RELATED 边端到端贡献≈0（docs/reports 归档）；词库资产文件保留
+ *   供报告复跑，无管线消费；names_zh 夹具 6/6 的 name-alias 为有效资产保留）。
+ * 本文件主体思路：names_zh.json → M3 别名表 + M1 提取词面 + M2 实体/Alias
+ *   （人名/专名归一域，严格等价；须在摄入前调用）。
  * 依赖关系：依赖 bench.h、M12 engine、M3 keyword；被 CLI 依赖。
  */
 #include <fstream>
@@ -122,21 +121,6 @@ Err apply_lexicon(Engine& engine, const std::string& path, int* applied) {
   return Err::Ok;
 }
 
-// apply_name_aliases 伪代码（人名/专名归一域，姓名别名表 --name-alias）：
-//   步骤1：读取并解析 names_zh.json（{"groups":[{"canonical":..., "aliases":[...]}]}）；
-//   步骤2：每组 canonical 三处落点，同一数据源三通道贯通：
-//     - M3 别名表：每个 alias → canonical（严等价语义；守卫=add_alias 内置保护
-//       原样——内置标准词不可改写、alias==standard 跳过，六轮结论：此域守卫必要）；
-//     - M1 提取器：canonical 与全变体注册为 concept 类关键词——非称呼型变体
-//       （李经理/建国）不经注册无法从原文提取，注册后写入侧经 M3 normalize
-//       归并到 canonical 关键词节点（CONTAINS 通道统一）；
-//     - M2 实体：canonical 以 person 建档并挂全变体 Alias 节点——摄入时
-//       称呼模式（老X/小X）提取出的昵称实体经 M2 三级候选的 Alias 命中
-//       归并到 canonical 实体（INVOLVES 通道统一）；已建档（重复加载/同名
-//       组）则跳过，保证幂等。
-//   步骤3：applied 累计 组数+别名数。
-// 注：与 --load-lexicon 不同，本表须在摄入前加载（写入侧 normalize 依赖别名表），
-//   由 CLI 在 ingest 之前调用；普通词同义词库属 graded 边表域，仍走 --word-edges。
 Err apply_name_aliases(Engine& engine, const std::string& path, int* applied) {
   std::ifstream f(path);
   if (!f) return Err::IoError;

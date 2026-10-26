@@ -180,79 +180,6 @@ static void test_fake_pipeline_e2e() {
   CHECK(judge.correctness("What is the name of Alice's cat?", "Mochi", pred) == 1.0);
 }
 
-// 词典蒸馏 mock 测试：批量响应解析 + 增量幂等 + 灌库（不打真实 API）
-static void test_lexicon() {
-  FakeLlmClient fake;
-  fake.default_response =
-      R"({"paint":{"synonyms":["painting","artwork"],"antonyms":[],"related":[{"word":"canvas","score":0.9}]},"run":{"synonyms":["running","jog"],"antonyms":["walk"],"related":[]}})";
-  // 词频表不存在 → 失败
-  CHECK(build_lexicon_json(fake, {"/nonexistent_vocab.json"}, "/tmp/ame_test_lex.json", 10,
-                           50, 1) < 0);
-
-  // 写两个小词频表再构建（多文件合并词频，先清理产物保证可重入）
-  std::filesystem::remove("/tmp/ame_test_lex.json");
-  FILE* f = std::fopen("/tmp/ame_test_vocab.json", "w");
-  std::fputs(R"({"conv_vocab_top":[["paint",100]],"question_vocab_top":[],"stats":{}})", f);
-  std::fclose(f);
-  FILE* f2 = std::fopen("/tmp/ame_test_vocab2.json", "w");
-  std::fputs(R"({"conv_vocab_top":[["run",80]],"question_vocab_top":[["paint",10]],"stats":{}})", f2);
-  std::fclose(f2);
-  CHECK(build_lexicon_json(fake, {"/tmp/ame_test_vocab.json", "/tmp/ame_test_vocab2.json"},
-                           "/tmp/ame_test_lex.json", 10, 50, 1) == 2);
-  // 增量幂等：再跑一次 → 0 新增，不再调 LLM
-  int calls_before = (int)fake.received.size();
-  CHECK(build_lexicon_json(fake, {"/tmp/ame_test_vocab.json", "/tmp/ame_test_vocab2.json"},
-                           "/tmp/ame_test_lex.json", 10, 50, 1) == 0);
-  CHECK((int)fake.received.size() == calls_before);
-
-  // 灌库：synonyms 进别名表，antonyms/related 建边；重复灌库幂等
-  Engine e;
-  e.remember("老张今天 paint 很开心");  // 让 paint/run 节点存在
-  e.remember("老王昨天 run 很累");
-  int applied = 0;
-  CHECK(apply_lexicon(e, "/tmp/ame_test_lex.json", &applied) == Err::Ok);
-  CHECK(applied > 0);
-  CHECK(e.keywords().normalize("painting") == "paint");
-  CHECK(e.keywords().normalize("jog") == "run");
-  size_t edges1 = e.storage().edge_count();
-  int applied2 = 0;
-  CHECK(apply_lexicon(e, "/tmp/ame_test_lex.json", &applied2) == Err::Ok);
-  CHECK(e.storage().edge_count() == edges1);  // 幂等：无重复边
-
-  // 多文件拼接：第二本词典含同词条 paint 的新同义词 sketch → 并集生效
-  FILE* f3 = std::fopen("/tmp/ame_test_lex2.json", "w");
-  std::fputs(R"({"version":"v1","entries":[{"word":"paint","synonyms":["sketch"],"antonyms":[],"related":[]}]})", f3);
-  std::fclose(f3);
-  CHECK(apply_lexicon(e, "/tmp/ame_test_lex2.json", nullptr) == Err::Ok);
-  CHECK(e.keywords().normalize("sketch") == "paint");   // 新同义词生效
-  CHECK(e.keywords().normalize("painting") == "paint"); // 旧同义词保留（并集）
-  CHECK(e.storage().edge_count() == edges1);            // 纯别名追加，无边变化
-}
-
-// 三分流单测：syn_strong 归并别名 / syn_near 只建相似边不归并 / antonyms 对立边
-static void test_lexicon_split() {
-  FILE* f = std::fopen("/tmp/ame_test_lex3.json", "w");
-  std::fputs(R"({"version":"v2","entries":[{"word":"paint","syn_strong":["painting","artwork"],"syn_near":[{"word":"sketch","score":0.9}],"antonyms":["erase"]}]})", f);
-  std::fclose(f);
-  Engine e;
-  e.remember("老张今天 paint 了一幅 sketch，没有用 erase");  // 让 paint/sketch/erase 节点存在
-  int applied = 0;
-  CHECK(apply_lexicon(e, "/tmp/ame_test_lex3.json", &applied) == Err::Ok);
-  // 同义 → 别名归并
-  CHECK(e.keywords().normalize("painting") == "paint");
-  CHECK(e.keywords().normalize("artwork") == "paint");
-  // 近义 → 不归一，只建 REL_SIMILAR 边（双节点保留）
-  CHECK(e.keywords().normalize("sketch") != "paint");
-  const Node* kp = e.keywords().find("paint");
-  const Node* ks = e.keywords().find("sketch");
-  const Node* ke = e.keywords().find("erase");
-  CHECK(kp && ks && ke);
-  CHECK(e.storage().find_edge(kp->uid, ks->uid, RelType::REL_SIMILAR) != nullptr);
-  // 反义 → REL_OPPOSITE 边（core 系数 0.5，扩散最低档）
-  CHECK(e.storage().find_edge(kp->uid, ke->uid, RelType::REL_OPPOSITE) != nullptr);
-  CHECK(conduction_coeff(RelType::REL_OPPOSITE) < conduction_coeff(RelType::REL_SIMILAR));
-}
-
 // 证据整合器 mock 测试：分块摘要 + 合并轮 + 失败回退（不打真实 API）
 // 注：digest 功能经两轮 A/B 判负已移除（README「已否证的假设」）。
 // 两阶段聚合作答 mock 测试：逐项 NONE 过滤、空列表弃答、聚合输入只含事实列表
@@ -304,8 +231,6 @@ int main() {
   test_llm_extractor();
   test_answerer_and_judge();
   test_fake_pipeline_e2e();
-  test_lexicon();
-  test_lexicon_split();
   test_two_stage_aggregate();
   test_extract_batch();
   // 集成测试（真实 API）默认跳过

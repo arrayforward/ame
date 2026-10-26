@@ -44,16 +44,13 @@ struct Cli {
   std::string validate_lexicon;  // --validate-lexicon：蒸馏词库 strong 流可互换校验（M2）
   std::string score_sims;        // --score-sims：词级近似 1-10 打分（第五轮 M3）
   std::string lexicon_out = "bench/data/lexicon.json";
-  std::string load_lexicon;    // --load-lexicon：词典灌库路径
   std::string question_ids;    // --question-ids：只评测这些 question_id（JSON 数组）
   int lexicon_topn = 2000;
   std::string save_graph;      // --save-graph PATH：摄入后整图（含档案）落 JSON（每 case 一个文件）
   std::string load_graph;      // --load-graph PATH：直接加载已摄入的图，跳过摄入/提取
   std::string feedback_dir;    // --feedback-dir PATH：M11 埋点+judge 信号回流 + M14 调优对比
                                // pass1 答题判分→feedback 落盘→pass2 同题单只跑召回对比排序）
-  std::string extractor_dict;  // --extractor-dict FILE：M1 提取器大词表（wordnet_words.txt），
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
-  std::string word_sim_path;   // --word-edges FILE[,FILE2]：统一 graded 边表（第六轮，默认空=关）
   std::string name_alias;      // --name-alias FILE：人名/专名严等价别名表（names_zh.json，
                                // 摄入前加载；M3 别名+M1 词面+M2 实体三通道贯通，默认空=关）
   int llm_rerank = 0;          // --llm-rerank N：句级语义 LLM 重排名额（0=关，默认 20 实验值）
@@ -98,7 +95,6 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--score-sims") cli.score_sims = next();
     else if (a == "--lexicon-out") cli.lexicon_out = next();
     else if (a == "--lexicon-topn") cli.lexicon_topn = std::atoi(next().c_str());
-    else if (a == "--load-lexicon") cli.load_lexicon = next();
     else if (a == "--question-ids") cli.question_ids = next();
     else if (a == "--entity-profile") cli.cfg.use_entity_profile = next() != "off";
     else if (a == "--think") cli.cfg.use_think = next() != "off";
@@ -113,8 +109,6 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--save-graph") cli.save_graph = next();
     else if (a == "--load-graph") cli.load_graph = next();
     else if (a == "--feedback-dir") cli.feedback_dir = next();
-    else if (a == "--extractor-dict") cli.extractor_dict = next();
-    else if (a == "--word-edges") cli.word_sim_path = next();
     else if (a == "--name-alias") cli.name_alias = next();
     else if (a == "--llm-rerank") cli.llm_rerank = std::atoi(next().c_str());
     else if (a == "--llm-rerank-all") cli.llm_rerank_all = true;  // 裸开关（默认关）
@@ -164,7 +158,6 @@ void usage() {
                "      [--cache-dir bench/cache] [--config bench/config/deepseek.local.json]\n"
                "      [--out report.json] [--abstain-threshold 0.15] [--abstain-categories 5]\n"
                "      [--dump results.ndjson]（逐题结果落盘，失败分析用）\n"
-               "      [--extractor-dict FILE]（graph：摄入后答题前加载 M1 大词表，查询侧词激活）\n"
                "      [--stem-en]（graph：M3 英文保守词干归一，查询/写入双侧，默认关）\n"
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
                "      [--name-alias FILE]（graph：人名/专名严等价别名表 names_zh.json，\n"
@@ -328,35 +321,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // 第六轮终局：--word-edges 统一 graded 边表（bench 级单例，各 case 共用只读指针）
-  // FILE = lexicon_en_sim.json（蒸馏边）；可选 FILE2 = 蒸馏词库（antonyms 流 ×0.35 反义弱边）
-  WordEdgeTable word_edge_table;
-  if (!cli.word_sim_path.empty()) {
-    size_t p2 = 0;
-    bool ok = true;
-    while (p2 <= cli.word_sim_path.size()) {
-      size_t comma = cli.word_sim_path.find(',', p2);
-      std::string path = cli.word_sim_path.substr(
-          p2, comma == std::string::npos ? comma : comma - p2);
-      bool good = (word_edge_table.edge_count() == 0 && word_edge_table.word_count() == 0)
-                      ? word_edge_table.load(path)
-                      : word_edge_table.load_antonyms(path);
-      if (!good) {
-        std::fprintf(stderr, "[warn] word-edges 加载失败（%s），按未加载继续\n",
-                     path.c_str());
-        ok = false;
-      }
-      if (comma == std::string::npos) break;
-      p2 = comma + 1;
-    }
-    if (ok && word_edge_table.word_count() > 0) {
-      std::fprintf(stderr, "[word-edges] 加载 %zu 词 %zu 边（%s）\n",
-                   word_edge_table.word_count(), word_edge_table.edge_count(),
-                   cli.word_sim_path.c_str());
-      cli.cfg.word_edges = &word_edge_table;
-    }
-  }
-
   // 步骤1：加载数据集
   std::vector<BenchCase> cases;
   if (cli.dataset == "locomo") cases = load_locomo(cli.data);
@@ -517,37 +481,7 @@ int main(int argc, char** argv) {
                  c.conversation_id.c_str(), st.events, st.entities, st.keywords,
                  c.questions.size());
 
-    // --load-lexicon：摄入完成后灌词典（别名归一/对立边/相似边）；
-    // 逗号分隔多文件按序拼接（同词条 synonyms/antonyms/related 取并集，幂等）
-    if (!cli.load_lexicon.empty()) {
-      size_t p = 0;
-      while (p < cli.load_lexicon.size()) {
-        size_t comma = cli.load_lexicon.find(',', p);
-        std::string path = cli.load_lexicon.substr(
-            p, comma == std::string::npos ? comma : comma - p);
-        int applied = 0;
-        if (apply_lexicon(e, path, &applied) == Err::Ok)
-          std::fprintf(stderr, "[lexicon] case %s 灌入 %d 条（%s）\n",
-                       c.conversation_id.c_str(), applied, path.c_str());
-        if (comma == std::string::npos) break;
-        p = comma + 1;
-      }
-    }
 
-    // --extractor-dict：L1 查询侧词激活——摄入完成后、答题前把大词表加载进 M1 提取器
-    // （AC 缓存 <file>.ac 同目录；缓存命中直接加载，首 case 构建后覆写缓存）。
-    // 加载后 gen_seeds 的自由文本通道（extractor_->extract(query)）与 CJK 词法通道
-    // 才能从大词表产出关键词/中文词，经 M3 normalize 命中图上关键词节点 → 语义 graph 入口。
-    if (!cli.extractor_dict.empty()) {
-      int n = e.extractor().load_keyword_dict_cached(cli.extractor_dict, "seg", 700000,
-                                                     cli.extractor_dict + ".ac");
-      if (n < 0)
-        std::fprintf(stderr, "[warn] extractor-dict 加载失败（%s），按未加载继续\n",
-                     cli.extractor_dict.c_str());
-      else
-        std::fprintf(stderr, "[extractor-dict] case %s 加载 %d 条（%s）\n",
-                     c.conversation_id.c_str(), n, cli.extractor_dict.c_str());
-    }
 
     for (auto& q : c.questions) {
       if (!only_qids.empty() && !only_qids.count(q.id)) continue;  // 固定样本过滤

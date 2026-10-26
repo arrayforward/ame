@@ -61,7 +61,7 @@ KeywordManager::KeywordManager(Storage& storage) : storage_(storage) {
 // 归一化：ASCII 统一小写（查询侧与写入侧词形对齐的通用规则，中文不受影响），
 //   再查别名表，命中返回标准词，未命中返回小写化结果。
 //   注（第六轮终局）：英文词形等价不再走 normalize 改写（R2 词干已退役），降级为
-//   WordEdgeTable 的 0.9/0.95 分铸边（seed 模块，graded 软匹配消费）。
+//   （3.0 刀2 起 graded 边表已裁，别名表为主要归一资产）
 std::string KeywordManager::normalize(const std::string& word) const {
   std::string low;
   low.reserve(word.size());

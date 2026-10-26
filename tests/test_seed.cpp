@@ -185,72 +185,7 @@ static void test_conditional_normalize() {
   CHECK(!has_seed(s4, "ev1"));   // 不经扩展误入
 }
 
-// 第六轮终局：统一 graded 边表（WordEdgeTable）——蒸馏边 + 反义弱边 + 现场铸词形边。
-// q19 型：kid 直接命中 + like→love 蒸馏边 0.8 → m=2 进池；无表历史行为；噪声零新增。
-static void test_word_edges() {
-  const char* sim_path = "/tmp/ame_test_wordsim.json";
-  {
-    std::ofstream f(sim_path);
-    f << "{\"source\":\"distilled-sim\",\"sims\":{\"like\":{\"love\":0.8}}}";
-  }
-  WordEdgeTable sim;
-  CHECK(sim.load(sim_path));
-  CHECK(sim.word_count() == 1 && sim.edge_count() == 1);
-  CHECK(sim.sim("like", "love") == 0.8f);
-  CHECK(sim.sim("love", "like") == 0.8f);   // 反向退化查找
-  CHECK(sim.sim("like", "hate") == 0.0f);
-  // 现场铸词形边（R2 词干改写的 graded 替代物）：双向可铸、分档 0.95/0.9
-  CHECK(sim.sim("love", "loves") == 0.95f);   // 复数档
-  CHECK(sim.sim("loves", "love") == 0.95f);   // 未登录词现场铸边再查
-  CHECK(sim.sim("hop", "hopped") == 0.9f);    // 过去档（双写还原）
-  CHECK(sim.sim("make", "making") == 0.9f);   // 进行档
-  CHECK(sim.sim("make", "maked") == 0.9f);    // 不规则不处理也不误铸为 1.0
-  CHECK(sim.sim("love", "loving") == 0.9f);
-  // 反义弱边：antonyms 流 ×0.35
-  const char* lex_path = "/tmp/ame_test_lex_ant.json";
-  {
-    std::ofstream f(lex_path);
-    f << "{\"entries\":[{\"word\":\"like\",\"syn_strong\":[],\"syn_near\":[],"
-         "\"antonyms\":[\"hate\"]}]}";
-  }
-  CHECK(sim.load_antonyms(lex_path));
-  CHECK(sim.sim("like", "hate") == 0.35f);    // 反义弱边
-  CHECK(sim.sim("like", "love") == 0.8f);     // 撞词取 max：蒸馏边不被反义边覆盖
-
-  Fixture f;
-  Node ev1, ev2;
-  ev1.uid = "ev1"; ev1.kind = NodeKind::Event;
-  ev1.text = "The kid love dinosaurs";      // kid 直接 + love→蒸馏边 0.8
-  ev2.uid = "ev2"; ev2.kind = NodeKind::Event;
-  ev2.text = "The weather is nice today";   // 零命中噪声
-  f.s.put_node(ev1); f.s.put_node(ev2);
-
-  // 无表（默认）：历史行为——单直接词非罕见 → 不进池
-  SeedQuery q0;
-  q0.text = "What did the kid like?";
-  auto s0 = f.sg.gen_seeds(q0);
-  bool f1 = false, f2 = false;
-  for (auto& sd : s0) {
-    if (sd.node_uid == "ev1") f1 = true;
-    if (sd.node_uid == "ev2") f2 = true;
-  }
-  CHECK(!f1 && !f2);
-
-  // 有表：软匹配命中（0.8 ≥0.5 计一个内容词命中）→ m=2 进池，噪声仍排除
-  SeedQuery q1;
-  q1.text = "What did the kid like?";
-  q1.word_edges = &sim;
-  auto s1 = f.sg.gen_seeds(q1);
-  bool b1 = false, b2 = false;
-  for (auto& sd : s1) {
-    if (sd.node_uid == "ev1") { b1 = true; CHECK(sd.source == "lex"); }
-    if (sd.node_uid == "ev2") b2 = true;
-  }
-  CHECK(b1);
-  CHECK(!b2);
-}
-
-  // 人名/专名归一（--name-alias 域）：称呼提取出的昵称（老X/小X）经别名表归到
+// 人名/专名归一（--name-alias 域）：称呼提取出的昵称（老X/小X）经别名表归到
   // canonical——查询侧实体词面 alias_of 命中时：canonical 实体/关键词入硬种子，
   // 且 canonical 词面注入 CJK 词法通道，全变体轮次（含称呼轮）直接事件级种子化；
   // 未加载别名表时行为与历史一致（英文人名 Alice 不经归一）。
@@ -311,7 +246,6 @@ int main() {
   test_merge_dedup();
   test_lex_seeds();
   test_conditional_normalize();
-  test_word_edges();
   test_name_alias_bridge();
   return AME_TEST_REPORT();
 }
