@@ -28,7 +28,7 @@
 
 namespace {
 
-// 句柄表伪代码：long 句柄 → Engine 实例（Mem 句柄表见 mem_jni.cpp，两表共用
+// 句柄表伪代码：long 句柄 → Engine 实例（3.0 刀1：mem_jni 已裁，仅此一表
 // ame_jni::g_mu/g_next，句柄数值不重叠）
 std::map<jlong, std::unique_ptr<ame::Engine>> g_engines;
 

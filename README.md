@@ -302,3 +302,33 @@ docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实
   边调制 MLP / LoRA 留接口。
 - 快照为单文件 JSON；批量导入的分批事务在内存图下退化为接口语义。
 - AC 自动机结构未进图快照（重载词典文件或 AC cache 重建，179ms）。
+
+---
+
+## 3.0 简化版（dev-3.0，七刀裁剪）
+
+在 2.0 的实验谱系收敛后，3.0 按 **docs/reports/ 已归档的证伪/停用清单** 裁剪，
+只保留有实证红利的路径（保留项 bench 数字回归实测见下表；裁剪依据均可溯到报告）。
+
+**保留**（实证资产）：1.x 图引擎六动词管道（记忆/联想/实体/纠错/档案/快照）、
+`--rerank bm25|cheap|llm` 三档 + guard/entity-pass 横切、cheap 特征学习重排
+（cheap_model_v2，11 特征）、LLM 全池语义打分 + 作答三指令（judge 0.63→0.73）、
+name-alias 专名归一（names_zh 6/6）、AC 自动机中文通道、快照 save/load。
+
+**裁剪**（七刀，均按归档证据）：
+
+| 刀 | 内容 | 依据（docs/reports/） |
+|---|---|---|
+| 1 | 2.0 分层存储 M15–M19（memobs/memfact/memindex/memview/mem）+ lmem 后端 + JNI/Java 双后端 | lmem P0-P3 系列报告，2.0 管线全链未超 1.x graph |
+| 2 | 词库召回系：graded 边表（WordEdgeTable）/同义近义反义灌库/extractor 大词表（12 词元贡献≈0；RELATED 边端到端≈0） | industry_baseline / 各轮消融 |
+| 3 | M11 feedback + M14 learning（含 beam/gate 耦合） | 反馈闭环报告：增益在噪声带内 |
+| 4 | thinker（M8 能量扩散 + IRCoT） | think 通道增益≤噪声带 |
+| 5 | 实验重排档 formula/svec/xenc + 历史别名（--llm-rerank/--llm-rerank-all 等） | formula_rerank/svec_eval/xenc_spike/wmd_spike 四份证伪归档 |
+| 6 | 实验脚本移 archive_retired/（17 个，不删） | 报告复跑性 |
+| 7 | README 本节 + versionCode 30/versionName "3.0-dev" | — |
+
+**裁剪后基线**（sample50 冻结配置 entity-pass 0.5 + guard 0.2）：
+bm25 ≈0.46 / cheap ≈0.557 / llm ≈0.65-0.67（judge 0.73）——与裁剪前冻结证据逐位一致。
+已裁脚本/模块的历史报告数字不受影响（产物固化于 bench/runs/，脚本留存 archive_retired/）。
+
+注：README/设计文档中 thinker/M14/词库等被裁件描述为历史档案未重写，统一以本节为准。

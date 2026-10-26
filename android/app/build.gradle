@@ -29,8 +29,8 @@ android {
         applicationId "com.ame.memory"
         minSdk 26
         targetSdk 34
-        versionCode 20
-        versionName "2.0-dev"
+        versionCode 30
+        versionName "3.0-dev"
         buildConfigField "String", "MINIMAX_API_KEY", "\"${lp.getProperty('MINIMAX_API_KEY', '')}\""
         buildConfigField "String", "MINIMAX_BASE_URL", "\"${lp.getProperty('MINIMAX_BASE_URL', 'https://api.minimaxi.com/v1')}\""
         buildConfigField "String", "MINIMAX_MODEL", "\"${lp.getProperty('MINIMAX_MODEL', 'MiniMax-M3')}\""
