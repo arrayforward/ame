@@ -52,18 +52,10 @@ struct Cli {
                                // 摄入后、答题前经 load_keyword_dict_cached 加载（查询侧词激活）
   std::string name_alias;      // --name-alias FILE：人名/专名严等价别名表（names_zh.json，
                                // 摄入前加载；M3 别名+M1 词面+M2 实体三通道贯通，默认空=关）
-  int llm_rerank = 0;          // --llm-rerank N：句级语义 LLM 重排名额（0=关，默认 20 实验值）
-  bool llm_rerank_all = false; // --llm-rerank-all on|off：重排窗口扩为全池（默认关）
   double entity_pass = -1.0;   // --entity-pass-threshold X：实体通道低置信放行（<0=关=现状）
   double rerank_guard = -1.0;  // --rerank-guard X：BM25 强命中豁免 LLM 重排（<0=关=现状）
   std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
-  std::string svec_rerank;     // --svec-rerank PATH：svec 档 12 特征模型 JSON（空=关）
-  std::string svec_scorer;     // --svec-scorer PATH：外挂打分器脚本（默认 bench/scripts/svec_scorer.py）
-  int formula_window = 0;      // --formula-window N：formula 档候选池扩到 M（0=用默认 120）
-  std::string formula_w;       // --formula-w "w0,...,w7"：公式权重注入（空=先验默认）
-  std::string formula_dump;    // --formula-dump PATH：逐候选特征贡献 ndjson
-  std::string xenc_scorer;     // --xenc-scorer PATH：cross-encoder 打分器（默认 bench/scripts/xenc_scorer.py）
-  std::string rerank_mode;     // --rerank bm25|cheap|svec|llm（空=未显式指定，由别名/默认推定）
+  std::string rerank_mode;     // --rerank bm25|cheap|llm（3.0 刀5：别名收敛，仅此开关）
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
 };
 
@@ -102,17 +94,9 @@ Cli parse_args(int argc, char** argv) {
     else if (a == "--save-graph") cli.save_graph = next();
     else if (a == "--load-graph") cli.load_graph = next();
     else if (a == "--name-alias") cli.name_alias = next();
-    else if (a == "--llm-rerank") cli.llm_rerank = std::atoi(next().c_str());
-    else if (a == "--llm-rerank-all") cli.llm_rerank_all = true;  // 裸开关（默认关）
     else if (a == "--entity-pass-threshold") cli.entity_pass = std::atof(next().c_str());
     else if (a == "--rerank-guard") cli.rerank_guard = std::atof(next().c_str());
     else if (a == "--cheap-rerank") cli.cheap_rerank = next();
-    else if (a == "--svec-rerank") cli.svec_rerank = next();
-    else if (a == "--svec-scorer") cli.svec_scorer = next();
-    else if (a == "--formula-window") cli.formula_window = std::atoi(next().c_str());
-    else if (a == "--formula-w") cli.formula_w = next();
-    else if (a == "--formula-dump") cli.formula_dump = next();
-    else if (a == "--xenc-scorer") cli.xenc_scorer = next();
     else if (a == "--rerank") cli.rerank_mode = next();
     else if (a == "--final-alpha") {
       cli.cfg.final_alpha = std::atof(next().c_str());
@@ -149,12 +133,8 @@ void usage() {
                "      [--word-sim FILE]（graph：词级近似表软匹配，graded sim，默认关）\n"
                "      [--name-alias FILE]（graph：人名/专名严等价别名表 names_zh.json，\n"
                "       摄入前灌入 M3 别名+M1 词面+M2 实体，默认关）\n"
-               "      [--rerank bm25|cheap|svec|llm]（graph：终排模式；默认 bm25=纯词面。\n"
-               "       cheap=特征重排器零LLM需 --cheap-rerank PATH；svec=cheap特征+句向量cos\n"
-               "       需 --svec-rerank PATH(12特征模型)+外挂scorer --svec-scorer PATH；\n"
-               "       llm=全池LLM打分）\n"
-               "      [兼容别名·deprecated] --llm-rerank N / --llm-rerank-all / --cheap-rerank\n"
-               "       PATH（映射到 --rerank；与 --rerank 不同档并用报互斥错）\n"
+               "      [--rerank bm25|cheap|llm]（graph：终排模式；默认 bm25=纯词面。\n"
+               "       cheap=特征重排器零LLM需 --cheap-rerank PATH；llm=全池LLM打分）\n"
                "      [--llm-prompt-pin]（llm 档 prompt 变体：词面精确命中必须保留靠前）\n"
                "      [--entity-pass-threshold X]（graph：实体档案通道低置信放行——通道榜首\n"
                "       内容分 < X 时候选并入标准管道池；默认 -1=关=现状；建议实验值 0.5）\n"
@@ -162,8 +142,6 @@ void usage() {
                "       保底 top-k 首槽；默认 -1=关；建议实验值 0.8）\n"
                "      [--cheap-rerank PATH]（graph：特征逻辑重排器替代 LLM 打分，零 LLM；\n"
                "       模型由 cheap_rerank_train.py 训练；默认空=关）\n"
-               "      [--svec-rerank PATH --svec-scorer PATH]（graph：svec 档 12 特征模型 +\n"
-               "       外挂 python 打分器；scorer 失败自动降级 cheap 原分，默认空=关）\n"
                "      [--final-alpha 0.6 --final-beta 0.4]（graph：L2 终排混合 BM25+融合分）\n"
                "API key: bench/config/deepseek.local.json 或环境变量 AME_DEEPSEEK_API_KEY\n");
 }
@@ -172,60 +150,22 @@ void usage() {
 
 int main(int argc, char** argv) {
   Cli cli = parse_args(argc, argv);
-  cli.cfg.llm_rerank = cli.llm_rerank;  // --llm-rerank N → BenchConfig（0=关）
-  cli.cfg.llm_rerank_all = cli.llm_rerank_all;      // --llm-rerank-all（默认关）
   cli.cfg.entity_pass_threshold = cli.entity_pass;  // --entity-pass-threshold（默认 -1=现状）
   cli.cfg.rerank_guard = cli.rerank_guard;          // --rerank-guard（默认 -1=关）
   cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
-  cli.cfg.svec_rerank_path = cli.svec_rerank;       // --svec-rerank（默认空=关）
-  if (!cli.svec_scorer.empty()) cli.cfg.svec_scorer = cli.svec_scorer;  // --svec-scorer
-  // ---- formula 档参数：窗口（默认 120）、权重注入（CSV 8 个）、特征 dump ----
-  if (cli.formula_window > 0) cli.cfg.formula_window = cli.formula_window;
-  if (!cli.formula_w.empty()) {
-    cli.cfg.formula_w.clear();
-    std::stringstream ss(cli.formula_w);
-    std::string item;
-    while (std::getline(ss, item, ',')) cli.cfg.formula_w.push_back(std::atof(item.c_str()));
-    if (cli.cfg.formula_w.size() != 8) {
-      std::fprintf(stderr, "--formula-w 需 8 个权重（bm25,involves,related,next,cooccur,time,fusion,opposite）\n");
-      return 1;
-    }
-  }
-  cli.cfg.formula_dump = cli.formula_dump;  // --formula-dump（默认空=不 dump）
-  if (!cli.xenc_scorer.empty()) cli.cfg.xenc_scorer = cli.xenc_scorer;  // --xenc-scorer
-
-  // ---- 终排模式消解（--rerank bm25|cheap|llm 一等公民；旧开关为兼容别名）----
-  // 互斥：显式 --rerank 与别名开关（--llm-rerank N>0 / --llm-rerank-all / --cheap-rerank）
-  // 请求不同档 → 报错退出（不猜优先级）；同档可叠加（参数合并，-all 优先窗口）。
+  // ---- 终排模式消解（--rerank bm25|cheap|llm；3.0 刀5 起历史别名全部收敛删除，
+  // --cheap-rerank 降为 cheap 档纯模型路径参数，不再参与模式推断）----
   {
-    std::unordered_set<std::string> modes;
-    std::string req;
-    auto add = [&](const std::string& m, const char* from) {
-      modes.insert(m);
-      req += std::string(req.empty() ? "" : ",") + from + "→" + m;
-    };
-    if (!cli.rerank_mode.empty()) add(cli.rerank_mode, "--rerank");
-    if (cli.llm_rerank > 0) add("llm", "--llm-rerank");
-    if (cli.llm_rerank_all) add("llm", "--llm-rerank-all");
-    if (!cli.cheap_rerank.empty()) add("cheap", "--cheap-rerank");
-    if (!cli.svec_rerank.empty()) add("svec", "--svec-rerank");
-    if (modes.size() > 1) {
-      std::fprintf(stderr, "终排模式互斥冲突: %s（请只保留一个模式开关）\n", req.c_str());
+    std::string mode = cli.rerank_mode.empty() ? "bm25" : cli.rerank_mode;
+    if (mode != "bm25" && mode != "cheap" && mode != "llm") {
+      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|llm）\n", mode.c_str());
       return 1;
     }
-    std::string mode = modes.empty() ? "bm25" : *modes.begin();
-    if (mode != "bm25" && mode != "cheap" && mode != "svec" && mode != "formula" &&
-        mode != "xenc" && mode != "llm") {
-      std::fprintf(stderr, "未知 --rerank 模式: %s（仅支持 bm25|cheap|svec|formula|xenc|llm）\n", mode.c_str());
+    if (mode == "cheap" && cli.cheap_rerank.empty()) {
+      std::fprintf(stderr, "--rerank cheap 需 --cheap-rerank PATH（模型 JSON）\n");
       return 1;
     }
-    if (mode == "llm" && !cli.llm_rerank_all && cli.llm_rerank <= 0)
-      cli.llm_rerank_all = true;  // --rerank llm 未指定窗口 → 默认全池（机制2正形）
-    if (mode == "svec" && cli.svec_rerank.empty()) {
-      std::fprintf(stderr, "--rerank svec 需 --svec-rerank PATH（12 特征模型 JSON）\n");
-      return 1;
-    }
-    if (mode == "formula") cli.cfg.k_pool = cli.cfg.formula_window;  // 扩窗：候选池 k_pool→M
+    cli.cfg.cheap_rerank_path = cli.cheap_rerank;     // --cheap-rerank（默认空=关）
     cli.cfg.rerank_mode = mode;
   }
 
@@ -351,7 +291,7 @@ int main(int argc, char** argv) {
                    cli.cfg.config_path.c_str());
       return 1;
     }
-    cli.cfg.llm_client = client.get();  // 句级语义重排通道注入（--llm-rerank N）
+    cli.cfg.llm_client = client.get();  // llm 档全池语义打分通道注入
     llm_ext = std::make_unique<LlmExtractor>(client.get(), &rule_ext);
     llm_ans = std::make_unique<LlmAnswerer>(client.get());
     llm_judge = std::make_unique<LlmJudge>(client.get());

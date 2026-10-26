@@ -348,7 +348,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;  // 只验标准管道重排
-    cfg.llm_rerank = 5;
     cfg.rerank_mode = "llm";
     FakeLlmClient fake;
     fake.rules.push_back({"q-rerank-1", "E2"});
@@ -363,7 +362,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;
-    cfg.llm_rerank = 5;
     cfg.rerank_mode = "llm";
     FakeLlmClient fake;
     fake.default_response = "";
@@ -376,7 +374,6 @@ static void test_llm_rerank_channel() {
   {
     BenchConfig cfg;
     cfg.use_entity_profile = false;
-    cfg.llm_rerank = 5;
     cfg.rerank_mode = "llm";
     FakeLlmClient fake;
     fake.default_response = "这些证据都不相关，无法回答。";
@@ -461,7 +458,6 @@ static void test_llm_rerank_all() {
   q.question = "What book was recommended to Melanie?";
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.llm_rerank_all = true;  // 全池窗口
   cfg.rerank_mode = "llm";
   FakeLlmClient fake;
   fake.rules.push_back({"q-rerank-all-1", "E2"});
@@ -487,7 +483,6 @@ static void test_rerank_guard() {
   q.question = "pottery?";  // 单内容词：idf 相消，榜首分 = tf/(tf+1) = 5/6 ≈ 0.833
   BenchConfig cfg;
   cfg.use_entity_profile = false;
-  cfg.llm_rerank_all = true;
   cfg.rerank_mode = "llm";
   FakeLlmClient fake;
   fake.rules.push_back({"q-guard-1", "E2"});  // LLM 误判 decoy 为相关
@@ -545,133 +540,6 @@ static void test_cheap_rerank() {
     CHECK(front && front->attrs.count("dia_id") && front->attrs.at("dia_id") == "D2:1");
   }
 }
-
-// svec 档（--rerank svec）：cheap 特征 + 外挂 scorer 提供的 svec_cos。
-// 正路：stub scorer 返回递增 cos → minmax 后末位候选置顶；scorer 缺失/输出非法/
-// 模型缺失 → 优雅降级（不 crash；降级后玩具模型全同分 → stable 保持 BM25 原序）。
-static void test_svec_rerank() {
-  Engine e;
-  const TimePoint ts0 = 1700000000;
-  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
-                  ts0, "D1:1", "s1");  // 金标：词面弱（池序 2）
-  e.remember_turn("Caroline",
-                  "Caroline asks what book to read next; did you finish your book?",
-                  ts0 + 60, "D2:1", "s2");  // decoy：词面高频（BM25 首）
-  // 玩具 12 特征模型：唯 svec_cos 权重 1（得分 = 题内 minmax(cos)）。
-  const char* mpath = "/tmp/ame_test_svec_model.json";
-  {
-    std::ofstream f(mpath);
-    f << "{\"features\":[\"svec_cos\"],\"weights\":[1.0],\"bias\":0.0}";
-  }
-  // stub scorer：读 --pool JSON，按池下标返回递增 cos（末位 = 1.0 最大）。
-  const char* stub = "/tmp/ame_test_svec_stub.py";
-  {
-    std::ofstream f(stub);
-    f << "import json,sys\n"
-         "a=sys.argv[sys.argv.index('--pool')+1]\n"
-         "d=json.load(open(a,encoding='utf-8'))\n"
-         "print(json.dumps({'cos':[float(i) for i,_ in enumerate(d['texts'])]}))\n";
-  }
-  // 垃圾 scorer：输出非 JSON（解析失败路径）。
-  const char* garbage = "/tmp/ame_test_svec_garbage.py";
-  { std::ofstream f(garbage); f << "print('garbage-not-json')\n"; }
-
-  BenchQuestion q;
-  q.id = "q-svec-1";
-  q.question = "What book was recommended to Melanie?";
-  auto mk = [&](const char* scorer) {
-    BenchConfig cfg;
-    cfg.use_entity_profile = false;
-    cfg.rerank_mode = "svec";
-    cfg.svec_rerank_path = mpath;
-    cfg.svec_scorer = scorer;
-    return cfg;
-  };
-  auto front_dia = [&](const auto& r) {
-    const Node* n = e.storage().get_node(r.evidence_uids.front());
-    return n && n->attrs.count("dia_id") ? n->attrs.at("dia_id") : "-";
-  };
-  // python 可用性（stub 正路前置；降级路径不依赖 python）。
-  bool has_py = false;
-  if (FILE* fp = popen("python -c pass", "r")) has_py = pclose(fp) == 0;
-  if (has_py) {
-    auto r = answer(e, q, mk(stub));  // 正路：cos 末位最大 → 金标置顶
-    CHECK(front_dia(r) == "D1:1");
-  } else {
-    std::fprintf(stderr, "  [test] python 不可用，svec stub 正路用例跳过（降级用例照跑）\n");
-  }
-  auto rd = answer(e, q, mk("/tmp/ame_test_no_such_scorer.py"));  // scorer 缺失 → 降级
-  CHECK(front_dia(rd) == "D2:1");
-  if (has_py) {
-    auto rg = answer(e, q, mk(garbage));  // scorer 输出非法 → 降级
-    CHECK(front_dia(rg) == "D2:1");
-  }
-  auto bm = mk(stub);  // 模型缺失 → 降级 BM25 原序
-  bm.svec_rerank_path = "/tmp/ame_test_no_such_svec_model.json";
-  CHECK(front_dia(answer(e, q, bm)) == "D2:1");
-}
-
-// formula 档（--rerank formula）：纯 bm25 权重下排序应与 bm25 原序一致（无崩溃、
-// 无图特征干扰的退化路径）；图特征非零权重下不崩溃即可（覆盖数由报告验收）。
-static void test_formula_rerank() {
-  Engine e;
-  const TimePoint ts0 = 1700000000;
-  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
-                  ts0, "D1:1", "s1");
-  e.remember_turn("Caroline",
-                  "Caroline asks what book to read next; did you finish your book?",
-                  ts0 + 60, "D2:1", "s2");
-  BenchQuestion q;
-  q.id = "q-formula-1";
-  q.question = "What book was recommended to Melanie?";
-  BenchConfig cfg;
-  cfg.use_entity_profile = false;
-  cfg.rerank_mode = "formula";
-  cfg.formula_w = {1, 0, 0, 0, 0, 0, 0, 0};  // 纯 bm25 → 与 BM25 终排序一致
-  auto r = answer(e, q, cfg);
-  CHECK(!r.evidence_uids.empty());
-  BenchConfig cfg_bm;
-  cfg_bm.use_entity_profile = false;
-  cfg_bm.rerank_mode = "bm25";
-  auto rb = answer(e, q, cfg_bm);
-  CHECK(rb.evidence_uids.size() == r.evidence_uids.size());
-  for (size_t i = 0; i < r.evidence_uids.size(); ++i)
-    CHECK(r.evidence_uids[i] == rb.evidence_uids[i]);
-  // 全先验权重 + 扩窗：不崩溃、证据数不超 k
-  BenchConfig cfg2 = cfg;
-  cfg2.formula_w = {0.9, 0.7, 0.9, 0.5, 0.6, 0.6, 0.4, -0.5};
-  cfg2.formula_window = 120;
-  auto r2 = answer(e, q, cfg2);
-  CHECK(r2.evidence_uids.size() <= (size_t)cfg2.k);
-}
-
-// cross-encoder 精排档（--rerank xenc）：scorer 缺失 → 优雅降级 BM25 原序。
-static void test_xenc_rerank() {
-  Engine e;
-  const TimePoint ts0 = 1700000000;
-  e.remember_turn("Melanie", "Melanie loved The Silent Patient, a book she could not put down.",
-                  ts0, "D1:1", "s1");
-  e.remember_turn("Caroline",
-                  "Caroline asks what book to read next; did you finish your book?",
-                  ts0 + 60, "D2:1", "s2");
-  BenchQuestion q;
-  q.id = "q-xenc-1";
-  q.question = "What book was recommended to Melanie?";
-  BenchConfig cfg;
-  cfg.use_entity_profile = false;
-  cfg.rerank_mode = "xenc";
-  cfg.xenc_scorer = "/tmp/ame_test_no_such_xenc_scorer.py";  // scorer 缺失
-  auto r = answer(e, q, cfg);
-  CHECK(!r.evidence_uids.empty());
-  BenchConfig cfg_bm;
-  cfg_bm.use_entity_profile = false;
-  cfg_bm.rerank_mode = "bm25";
-  auto rb = answer(e, q, cfg_bm);
-  CHECK(rb.evidence_uids.size() == r.evidence_uids.size());
-  for (size_t i = 0; i < r.evidence_uids.size(); ++i)
-    CHECK(r.evidence_uids[i] == rb.evidence_uids[i]);  // 降级 BM25 原序
-}
-
 // 模式门控：bm25 档（默认）即使有 LLM 客户端/全池标志也不触发重排（Fake 零调用）；
 // cheap 档未配模型路径 → 日志降级、行为 = BM25 原序。
 static void test_rerank_mode_gating() {
@@ -688,7 +556,6 @@ static void test_rerank_mode_gating() {
   BenchConfig cfg;
   cfg.use_entity_profile = false;
   // bm25 档：全池标志 + 客户端齐备也不得触发（模式互斥于参数）
-  cfg.llm_rerank_all = true;
   cfg.rerank_mode = "bm25";
   FakeLlmClient fake;
   fake.default_response = "E2";  // 若误触发会把金标置顶——断言不触发
@@ -724,9 +591,6 @@ int main() {
   test_entity_pass_through();
   test_rerank_guard();
   test_cheap_rerank();
-  test_svec_rerank();
-  test_formula_rerank();
-  test_xenc_rerank();
   test_rerank_mode_gating();
   test_parse_session_date();
   test_store_adapters();
