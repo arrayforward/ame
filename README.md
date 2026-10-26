@@ -37,16 +37,13 @@
                         │
                      rerank(M7) ← time/vector
                         │
-                    thinker(M8) ──（能量模式 / IRCoT 模式）
-                        │
-        feedback(M11) → learning(M14) → rerank
-                        │
                      engine(M12)  ← 聚合以上全部模块（六动词外观）
                         │
                   bench（基准适配）/ llm（DeepSeek 接入）
 ```
 
-14 个模块 + core 公共层，每模块一个子目录、一个静态库，依赖用
+12 个模块 + core 公共层（3.0 已裁 M8 thinker / M11 feedback / M14 learning，
+裁剪依据见文末"3.0 简化版"），每模块一个子目录、一个静态库，依赖用
 `target_link_libraries` 显式声明（无环）。
 
 ---
@@ -87,20 +84,17 @@ Place.timezone/open_hours 投影，人生阶段由 Entity.LIFE_PHASE 投影，�
 PageRank 式出度归一防枢纽节点（主角实体）均匀喷灌淹没直接证据；休眠关键词不参与。
 
 **融合打分（M7）**。`final = α·图扩散分 + β·语境余弦相似度 + γ·时间衰减×importance`
-（默认 0.5/0.3/0.2，M14 可离线调优）。图扩散分以事件节点能量做 max 归一（关键词枢纽
+（默认 0.5/0.3/0.2，固定权重；3.0 已裁 M14 离线调优，bench 可用
+`--final-alpha/--final-beta` 做对比实验）。图扩散分以事件节点能量做 max 归一（关键词枢纽
 能量是多路径累加的，若用全局 max 会把直接证据压到 0）；filters 支持时间范围/实体
 类型/人生阶段/场所时段；explain 生成中文路径说明。
 
-**Think 编排（M8，双模式）**。能量模式：多轮"软→硬→软"循环，上轮高分发现迁移为下轮
-焦点，能量跨轮累加并衰减，终止四条件（轮数上限/能量枯竭/结论高置信/焦点漂移）。
-IRCoT 模式（`--think-mode ircot`）：LLM 以回调注入，每轮基于"问题+证据池+子查询历史"
-产出 `{reasoning, next_query|done}`，next_query 走完整检索链路取证去重并入，done/
-轮数上限/无新证据终止——对证据缺失型失败有效（验证见"已否证的假设"对侧记录）。
+~~Think 编排（M8，双模式）~~ **[3.0 已裁]**：能量模式与 IRCoT 多轮取证增益≤噪声带，
+thinker 模块整体移除（归档证据见文末裁剪表）；读取链路为 seed→diffusion→rerank 单遍管道。
 
-**束搜索 + 监督边门控（引导式扩散阶段 1）**。`diffuse_beam`：best-first，逐跳只扩能量
-top-m 前沿（默认 m=50），diffuse 接口不变。门控 `M(edge)=sigmoid(logit(类型系数)+MLP(x))`
-（特征：emb 头尾压缩 128→16 + onehot 类型 + 手工上下文），初始化恒等于规则传导
-（未训练不回归）；与阶段 2 RL 策略网络同构，将来只换训练器。
+**束搜索（引导式扩散原语）**。`diffuse_beam`：best-first，逐跳只扩能量
+top-m 前沿（默认 m=50），diffuse 接口不变。原语保留；监督边门控 `M(edge)` 的
+训练器随 M14 在 3.0 裁撤（gate_fn 接口仍在，未训练不回归）。
 
 **实体解析三级决策树（M2）**。① uid 直连（校验存在性）；② 强标识符精确匹配
 （VIN/手机号，无则建档）；③ 裸名字 + 上下文证据投票（共同经历+0.3、空间一致+0.2、
@@ -149,8 +143,9 @@ k_pool 候选池（~50 条）→ 本地预过滤（池内 BM25-lite，零 LLM，
 | LongMemEval | github.com/xiaowu0162/LongMemEval（`longmemeval_s.json`） | recall@k（answer_session_ids 命中）、judge、abstention |
 | BEAM | github.com/mohammadtavakoli78/BEAM | nugget 词重叠代理分（IJudge 可换真实 LLM）、event_ordering Kendall tau-b |
 
-**当前指标（最优管线：rule 摄入 + 实体档案 + 蒸馏词典 + 查询扩展 + 证据内容词终排 +
-NEXT±1 + think + k_pool）**：
+**历史指标快照（2.0 前最优管线：rule 摄入 + 实体档案 + 蒸馏词典 + 查询扩展 +
+证据内容词终排 + NEXT±1 + think + k_pool；其中蒸馏词典/查询扩展/think 已在 3.0
+裁撤，现行口径见文末"3.0 简化版"基线）**：
 
 | 基准 | recall@10 | judge | 备注 |
 |---|---|---|---|
@@ -217,19 +212,20 @@ Windows MinGW——工程使用 POSIX 接口 gmtime_r/popen 等）。
 ## 六、使用说明
 
 ```bash
-./build/demo/ame_demo                 # 中文演示：remember→lookup→recall(explain)→think→快照→学习
-cd build && ctest --output-on-failure # 18/18 全绿（16 模块单测 + e2e + bench + llm）
+./build/demo/ame_demo                 # 中文演示：remember→lookup→recall(explain)→快照
+cd build && ctest --output-on-failure # 模块单测 + e2e + bench + llm
 
 # 基准评测（以 LoCoMo 为例，数据自备）
 ./build/bench/ame_bench --dataset locomo --data bench/data/locomo10.json \
   --answer llm --judge llm --concurrency 16 --cache-dir bench/cache \
-  --load-lexicon lexicon/lexicon.json --think on \
+  --rerank cheap --cheap-rerank bench/models/cheap_model.json \
   --out report.json --dump results.ndjson
-# 常用参数：--limit N --k 10 --k-pool 60 --abstain-threshold 0.15
+# 常用参数：--limit N --k 10 --abstain-threshold 0.15
 #   --extractor rule|llm --answer baseline|llm --judge f1|llm
-#   --think-mode energy|ircot --beam 50 --weights 0.5,0.3,0.2
+#   --rerank bm25|cheap|llm（默认 bm25；cheap 零 LLM 特征重排，llm 全池语义打分）
+#   --rerank-guard 0.2 --entity-pass-threshold 0.5 --final-alpha 0.5 --final-beta 0.3
 #   --save-graph P / --load-graph P（摄入快照，零提取重放）
-#   --question-ids ids.json（固定样本）--feedback-dir P（M11/M14 闭环）
+#   --question-ids ids.json（固定样本）--name-alias P（专名归一表）
 #   --entity-profile on|off --conditional-normalize on|off --answer-mode aggregate
 #   --agg-prefilter-n 20（聚合预过滤保留条数）--agg-batch 5（批量提取每次条数）
 ```
@@ -249,11 +245,11 @@ cd build && ctest --output-on-failure # 18/18 全绿（16 模块单测 + e2e + b
 
 ```
 core/ storage/ time/ vector/ keyword/ extractor/ entity/ graph_writer/
-seed/ diffusion/ rerank/ thinker/ feedback/ learning/ engine/   # 14 模块 + core
+seed/ diffusion/ rerank/ engine/                       # 12 模块 + core（3.0 裁 M8/M11/M14）
 bench/        # 基准适配层（loader/ingest/answer/metrics/CLI/fixtures/scripts）
 llm/          # DeepSeek 接入（客户端/提取器/答题器/评审器/词典蒸馏）
 lexicon/      # 词库资产（68万+ 词条，含 README 与 lexicon_src 整理中间层）
-tests/        # 18 个测试可执行（模块单测 + e2e + bench + llm，ctest 注册）
+tests/        # 模块单测 + e2e + bench + llm（ctest 注册）
 demo/         # 中文演示程序
 docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实现与优化文档，reports/ 评测报告）
 ```
@@ -268,14 +264,11 @@ docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实
 | M13 vector | 哈希 embedding 软种子与语境分（弱语义兜底） |
 | M1 extractor | 规则提取（摄入/查询侧关键词）/ LlmExtractor 会话批提取（实体+关键词+属性三元组） |
 | M2 entity | 实体档案：消歧、槽位（知识更新）、时间线；查询侧人名锚定 |
-| M3 keyword | 别名归一（词典灌库）、低频休眠、RELATED 边扩散通道 |
+| M3 keyword | 别名归一（--name-alias 专名归一表）、低频休眠（3.0 已裁词典灌库/RELATED 边召回通道） |
 | M4 graph_writer | 写入即生长：共现/共历/NEAR/NEXT 链/SUPERSEDES |
 | M5 seed | 硬/软/词法（IDF)/坐标种子，实体锚点硬种子 |
-| M6 diffusion | 加权扩散（出度归一防枢纽淹没），think 的推理原语 |
-| M7 rerank | α/β/γ 融合（事件级归一）、filters、explain；权重可被 M14 调优（--weights 验证） |
-| M8 thinker | think 通道：时序/多跳题多轮推理取证（能量/IRCoT 双模式） |
-| M11 feedback | QA 逐题 log_query + judge 结果回流（select/ignore）落 JSONL（--feedback-dir） |
-| M14 learning | 回流 triples 离线调 α/β/γ（train_offline+promote），--weights 对比验证 |
+| M6 diffusion | 加权扩散（出度归一防枢纽淹没），recall 的推理原语 |
+| M7 rerank | α/β/γ 融合（事件级归一，固定权重）、filters、explain；bench 终排三档 --rerank bm25|cheap|llm |
 | M12 engine | 六动词外观 + remember_turn/get_entity_profile/组合快照，全模块装配 |
 | bench/llm | 加载/摄入/答题/判分/词典蒸馏/缓存（接入层工具链） |
 
@@ -284,8 +277,8 @@ docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实
 ## 八、路线图与已知限制
 
 **路线图**：① 聚合类问题两阶段答题（阶段一提取召回增强：k_pool 全量逐项）；
-② 引导式扩散阶段 2（RL 边门控，接口已同构）；③ 语料自训练词向量接入 IEmbedder；
-④ LongMemEval-S 全量 500 题；⑤ BEAM 真实数据适配；⑥ 每用户 LoRA（M14 路线）。
+② 语料自训练词向量接入 IEmbedder；③ LongMemEval-S 全量 500 题（发布期全量评测）；
+④ BEAM 真实数据适配。引导式扩散 RL 边门控与每用户 LoRA 属 M14 路线，已随 3.0 裁剪冻结。
 
 **已知限制（相对设计文档）**
 
@@ -298,8 +291,6 @@ docs/         # 文档（design/ 设计文档+架构图，engineering/ 工程实
 - **时区**：固定小时偏移（`Place.attrs["tz_offset"]`），无 tz 数据库/夏令时。
 - **SUPERSEDES 槽位启发式**：同实体同槽位词（df≤5）即触发，语义偏宽（过度标记已收敛
   但非精确冲突检测）。
-- **M14**：V1 仅 α/β/γ 网格搜索 + 赫布边权调整 + 监督边门控（阶段 1）；
-  边调制 MLP / LoRA 留接口。
 - 快照为单文件 JSON；批量导入的分批事务在内存图下退化为接口语义。
 - AC 自动机结构未进图快照（重载词典文件或 AC cache 重建，179ms）。
 
@@ -331,4 +322,8 @@ name-alias 专名归一（names_zh 6/6）、AC 自动机中文通道、快照 sa
 bm25 ≈0.46 / cheap ≈0.557 / llm ≈0.65-0.67（judge 0.73）——与裁剪前冻结证据逐位一致。
 已裁脚本/模块的历史报告数字不受影响（产物固化于 bench/runs/，脚本留存 archive_retired/）。
 
-注：README/设计文档中 thinker/M14/词库等被裁件描述为历史档案未重写，统一以本节为准。
+**APK 重排档（3.0 起）**：默认 **cheap**——`assets/cheap_model.json` 建 session 时注入
+JNI（`AmeEngine.loadCheapModel`），recall 在原生侧走 候选池60 → 11 特征逻辑重排 → topN，
+零 LLM、毫秒级；加载失败自动回退引擎原序（bm25 行为）。手动"深度重排"开关不变，
+开启时由 Java 侧 M3 全池语义打分（llm 档）。文档已同步：设计文档被裁节就地标注
+"[3.0 已裁]"，2.0 分层架构稿标注裁撤归档，工程文档/目录树/CLI 参数均为现行口径。

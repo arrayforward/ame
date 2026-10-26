@@ -22,20 +22,23 @@
 │  AME 引擎（C++17，仓库源码零分叉复用）          │
 │  core/storage/time/vector/extractor/entity/    │
 │  keyword/graph_writer/seed/diffusion/rerank/   │
-│  thinker/feedback/learning/engine              │
+│  engine（3.0 裁 thinker/feedback/learning）  │
 │  （llm/bench 不进 Android；联网在 Java 侧）   │
 └────────────────────────────────────────────────┘
 ```
 
-## JNI 接口（`ame_jni/ame_jni.cpp` ↔ `AmeEngine.kt`）
+## JNI 接口（`ame_jni/ame_jni.cpp` ↔ `AmeEngine.java`）
 
 | 方法 | 语义 |
 |---|---|
 | `nativeCreateSession(dir) → jlong` | 建 Engine 并加载 dir/graph.json 快照（若有），返回句柄 |
 | `nativeDestroySession(handle, dir)` | 快照兜底落盘后销毁实例 |
 | `nativeRememberTurn(handle, speaker, text, ts, diaId, sessionId) → int` | 写一轮对话（user/assistant 双侧） |
-| `nativeRecall(handle, query, limit) → String` | 记忆检索，返回 JSON `[{text,ts,score}]` |
+| `nativeRecall(handle, query, limit) → String` | 记忆检索，返回 JSON `[{text,ts,score}]`；注入 cheap 模型后自动 池60→特征重排→topN |
+| `nativeLoadCheapModel(handle, modelJson) → int` | 注入 cheap 重排模型（assets/cheap_model.json，默认启用）；1=成功，0=解析失败回退原序 |
+| `nativeLoadKeywordDict(handle, dict, cache) → int` | 加载中文关键词词典（AC 自动机 + 二进制缓存，多 session 共享） |
 | `nativeGetProfile(handle) → String` | 用户代理实体档案槽位 JSON `{name,slots:[...]}` |
+| `nativeStats(handle) → String` | 引擎统计 `{turns,total_chars,events,nodes}` |
 | `nativeSave/nativeLoad(handle, dir) → int` | 显式快照落盘/恢复 |
 
 持久化布局：`filesDir/sessions.json`（会话元数据）、

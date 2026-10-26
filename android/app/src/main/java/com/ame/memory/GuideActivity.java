@@ -125,6 +125,7 @@ public class GuideActivity extends AppCompatActivity {
         io.execute(() -> {
             AmeEngine eng = AmeEngine.create(sessionDir.getAbsolutePath());
             KeywordDict.ensureLoaded(this, eng);
+            CheapRerank.ensureLoaded(this, eng);
             runOnUiThread(() -> {
                 engine = eng;
                 orchestrator = new MemoryOrchestrator(eng, store, sessionId,

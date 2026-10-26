@@ -42,10 +42,15 @@
 
 ## 加载方式
 
+> **3.0 注记**：`--load-lexicon`（同义/反义/关联灌库召回）与 graded 边表
+> （--word-edges）已在 dev-3.0 裁撤（端到端贡献≈0，证据见
+> docs/reports/lexicon_activation.md）；词库资产保留用于蒸馏工具与专名归一。
+> 现行唯一运行时入口是 `--name-alias`（见下节）。
+
 ```bash
-# 多文件拼接（并集合并，幂等；同词条同义/反义/关联取并集）
+# 专名归一表（3.0 现行入口，须在摄入前加载）
 ./build/bench/ame_bench --dataset locomo --data <数据文件> \
-  --load-lexicon lexicon/lexicon.json,lexicon/lexicon_zh.json,lexicon/lexicon_zh2.json,lexicon/lexicon_hf.json
+  --name-alias lexicon/names_zh.json
 ```
 
 ## 蒸馏工具复跑（增量断点续跑）
@@ -66,8 +71,8 @@ python3 bench/scripts/organize_dicts.py    # funNLP 源目录 → lexicon_src/
 ## 人名/专名归一表（names_zh.json，第六轮结论的专名域落地）
 
 六轮词库调查的最终结论（docs/reports/lexicon_activation.md §9–§14）：等价归一表的正确域是
-**专有名词**（人名/昵称/地名/机构名的同一性归并，严等价+守卫必要），普通词同义属于
-graded 边表（--word-edges）。`names_zh.json` 即专名归一域的数据源：
+**专有名词**（人名/昵称/地名/机构名的同一性归并，严等价+守卫必要），普通词同义的
+graded 边表方案已证伪裁撤。`names_zh.json` 即专名归一域的数据源：
 
 ```json
 {"source": "names_zh",
@@ -75,8 +80,7 @@ graded 边表（--word-edges）。`names_zh.json` 即专名归一域的数据源
 ```
 
 - **语义**：组内是人工确认的同一自然人断言（严等价）；同名同姓的两个不同人不得进同组。
-- **加载**：`--name-alias lexicon/names_zh.json`（默认关；须在摄入前加载，与 --load-lexicon
-  的摄入后灌库不同）。一处数据三通道贯通：M3 别名表（add_alias，守卫原样）+
+- **加载**：`--name-alias lexicon/names_zh.json`（默认关；须在摄入前加载）。一处数据三通道贯通：M3 别名表（add_alias，守卫原样）+
   M1 提取词面注册（非称呼变体可从原文提取）+ M2 实体建档（canonical + 全变体 Alias 节点，
   称呼模式"老X/小X"提取的昵称摄入时经 Alias 命中归并）。
 - **验收**：docs/reports/name_alias.md（中文小夹具 names_zh_mini.json，OFF 0/6 → ON 6/6，

@@ -238,7 +238,8 @@ public class MemoryOrchestrator {
     // assemble 伪代码：system（人设+档案+recall 证据[+联网搜索结果]）+ 滑窗轮次
     //   （图片轮只带记忆文本）+ 当前用户轮（带图则多模态）；同时估算本轮发送 token
     //   并记录 lastSentTokens。顺带产出 TurnDiag 快照供诊断 tab。
-    // 证据装配顺序：recall(query, limit) → [deepRerank 时全池语义重排] → 证据列表
+    // 证据装配顺序：recall(query, limit)（JNI 注入 cheap 模型后默认 池60→特征重排→topN）
+    //   → [deepRerank 时全池语义重排] → 证据列表
     //   传入 buildSystemPrompt 注入 → 联网搜索结果追加在证据段之后。
     //   与 webSearch 同开的顺序说明（规格选定"搜索注入后整体重排"的等价实现）：
     //   重排只作用于记忆证据列表、搜索文本只追加在 system 末尾，两者数据无依赖，
@@ -312,6 +313,7 @@ public class MemoryOrchestrator {
     }
 
     // recallEvidence：引擎 recall（limit 条，引擎侧已按分数去重）+ 滑窗重叠过滤。
+    //   cheap 默认档在 JNI 内完成（池 60 → 11 特征逻辑重排 → topN），此处无感知。
     //   windowTexts=滑窗原文集合——已在滑窗里的证据直接跳过（否则同一条消息在
     //   system 证据段和滑窗 messages 里出现两次，浪费 token）；证据内部去重由
     //   引擎 rerank 在截断前完成，这里不重复做。返回候选条目（text/ts/score）。

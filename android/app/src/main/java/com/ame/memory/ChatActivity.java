@@ -106,6 +106,7 @@ public class ChatActivity extends AppCompatActivity {
             String dir = store.sessionDir(sessionId).getAbsolutePath();
             AmeEngine eng = AmeEngine.create(dir);
             KeywordDict.ensureLoaded(this, eng);
+            CheapRerank.ensureLoaded(this, eng);
             runOnUiThread(() -> {
                 engine = eng;
                 orchestrator = new MemoryOrchestrator(eng, store, sessionId);

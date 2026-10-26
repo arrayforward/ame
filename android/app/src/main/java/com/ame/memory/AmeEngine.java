@@ -46,6 +46,8 @@ public final class AmeEngine implements AutoCloseable {
 
     private static native int nativeLoadKeywordDict(long handle, String dict, String cache);
 
+    private static native int nativeLoadCheapModel(long handle, String modelJson);
+
     public boolean isValid() {
         return handle != 0L;
     }
@@ -77,6 +79,11 @@ public final class AmeEngine implements AutoCloseable {
     /** 加载中文关键词词典（AC 自动机 + 二进制缓存）；返回条数，<0 失败 */
     public int loadKeywordDict(String dictPath, String cachePath) {
         return nativeLoadKeywordDict(handle, dictPath, cachePath);
+    }
+
+    /** 注入 cheap 重排模型 JSON；1=启用（recall 走池60→特征重排→topN），0=解析失败回退原序 */
+    public int loadCheapModel(String modelJson) {
+        return nativeLoadCheapModel(handle, modelJson);
     }
 
     @Override

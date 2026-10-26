@@ -15,9 +15,9 @@ App（Java，纯 Java 无 Kotlin）                    AME 引擎（C++17，零�
 │ MainActivity（session 列表+双 tab）      │      │ core / storage / time / vector │
 │ ChatActivity / GuideActivity（聊天页）   │ JNI  │ keyword / extractor / entity   │
 │ MemoryOrchestrator（记忆编排，核心逻辑）  │ ───► │ graph_writer / seed / diffusion│
-│ MiniMaxClient（LLM/OpenAI 兼容 API）     │ 桥   │ rerank / thinker / engine(1.x) │
-│ SessionStore / KeywordDict / GuidePdf   │      │ memobs/memfact/memindex/       │
-│ LmemEngine / AmeEngine（MemEngine 接口） │      │ memview/mem（2.0 分层存储）     │
+│ MiniMaxClient（LLM/OpenAI 兼容 API）     │ 桥   │ rerank / engine（12 模块）    │
+│ SessionStore / KeywordDict / CheapRerank │      │ （3.0 单后端 graph；2.0 分层  │
+│ GuidePdf / AmeEngine（JNI 薄壳）         │      │  存储已裁，留存 dev-2.0）     │
 └────────────────────────────────────────┘      └────────────────────────────────┘
         联网：MiniMax M3（对话/vision/搜索）+ web_search Server Tool
 ```
@@ -45,8 +45,7 @@ MINIMAX_API_KEY=<key>            # 必填，Bearer 认证
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1   # 可选，默认官方
 MINIMAX_MODEL=MiniMax-M3         # 可选，默认 M3（256k 推理模型）
 CONTEXT_WINDOW_TURNS=8           # 可选，滑窗消息条数（=4 轮对话）
-RECALL_TOP_K=5                   # 可选，默认档证据条数
-MEM_STORE=graph                  # 可选：graph=1.x 图引擎 / lmem=2.0 分层存储
+RECALL_TOP_K=5                   # 可选，默认档证据条数（cheap 重排后注入条数）
 ```
 
 命令行构建（Windows，Git Bash）：
@@ -61,16 +60,17 @@ cd android
 
 - **C++ 侧**：`app/build.gradle` 的 `externalNativeBuild` 指向
   `ame_jni/CMakeLists.txt`，后者 `add_subdirectory` **仓库根 CMakeLists**——
-  1.x 的 15 个 M 模块 + 2.0 的 M15~M19（memobs/memfact/memindex/memview/mem）
+  3.0 的 12 个 M 模块（M1–M10/M12/M13，M8/M11/M14 与 2.0 M15~M19 已裁）
   源码**零分叉**直接编进 `libame_jni.so`；bench/llm/tests/demo 不进 Android。
   ABI 只打 `arm64-v8a`（体积与真机覆盖的取舍）。
-- **JNI 两个桥**：`ame_jni.cpp`（1.x Engine 外观：7 个 native 方法）+
-  `mem_jni.cpp`（2.0 Mem 网关：8 个 native 方法），共用 `jni_util.hpp`
-  （MUTF-8↔UTF-8 双向转换、全局句柄表）。句柄用单调递增 `jlong`（防悬空复用），
-  close 先摘表再等锁，destroy 时 1.x 走"快照兜底落盘"、2.0 天然逐条 append。
+- **JNI 单桥**：`ame_jni.cpp`（Engine 外观 + cheap 重排模型注入），共用
+  `jni_util.hpp`（MUTF-8↔UTF-8 双向转换、全局句柄表）。句柄用单调递增
+  `jlong`（防悬空复用），close 先摘表再等锁，destroy 走"快照兜底落盘"。
 - **词典进 APK**：Gradle `copyKeywordDict` 任务构建期从仓库 `lexicon/` 拷贝
   67.8 万词词表进 assets（不进源码树）；首启拷到 `files/dict/` 并建 AC 二进制
   缓存，**全 App 一份、多 session 共享秒载**（`KeywordDict.ensureLoaded`）。
+- **cheap 模型进 APK**：`assets/cheap_model.json`（668B，11 特征+权重+bias）
+  随源码入库；建 session 时 `CheapRerank.ensureLoaded` 注入 JNI，默认启用。
 - **key 安全**：只经 local.properties→BuildConfig，日志/仓库不落；debug 签名。
 
 ## 4. 运行时架构
@@ -78,7 +78,7 @@ cd android
 - **生命周期**：每个 session 一个引擎实例，随 Activity 创建/销毁；
   `onDestroy` → `close()` → 快照兜底。**无 Service 常驻**（简单优先，
   代价是离开页面即释放、回页重载——研究期取舍，常驻化在路线图）。
-- **异步初始化**：引擎创建（载 graph.json/lmem 分片）+ 词典加载在 io 线程，
+- **异步初始化**：引擎创建（载 graph.json 快照）+ 词典/cheap 模型加载在 io 线程，
   `ready` 门控——**历史上"进 session 卡死"就是 UI 线程同步载快照所致**；
   网络回调晚于销毁会碰已 shutdown 的线程池，`refreshStatus` 有
   `io.isShutdown() || !ready` 双守卫（`RejectedExecutionException` 崩溃的教训）。
@@ -89,19 +89,13 @@ cd android
   的一句话描述文本（≤40 字）；相机合约必须有落点 → cacheDir 临时文件用完即删
   （`file_paths.xml` 记得配 `cache-path`——漏配会点拍照即崩）。
 
-## 5. 双后端（MEM_STORE）
+## 5. 存储后端（3.0：单后端 graph）
 
-`MemEngine` 接口（rememberTurn/recall/getProfile/stats/save/close）两个实现：
-
-- **graph（1.x）**：`AmeEngine`。每 session 一张完整记忆图（事件+实体+关键词
-  同图），整图 JSON 快照节流落盘（每 10 轮 + 销毁兜底——每轮全量 dump 的
-  O(N²) 卡顿教训）。
-- **lmem（2.0）**：`LmemEngine`。观测层 append-only 分片 + fold 三序裁决 +
-  可重建索引 + 视图层查询时合成。旧 session 首启**自动迁移** graph.json→
-  观测层（按内容幂等去重 + flag 防重跑）。
-
-研究期结论：lmem 在抽样评测上与 1.x 持平略超且架构更干净（事实/解释分离、
-erase 语义），但 2.0 主力开发已被战略叫停（资源回 1.x 线），默认 graph。
+每 session 一张完整记忆图（事件+实体+关键词同图），整图 JSON 快照节流落盘
+（每 10 轮 + 销毁兜底——每轮全量 dump 的 O(N²) 卡顿教训）。
+2.0 分层存储（lmem/MemEngine 双后端、观测层分片与自动迁移）已在 3.0 裁撤
+（研究期评测全链未超 1.x，证据见 `../docs/reports/lmem_p0_report.md` 等），
+实现留存 dev-2.0 分支；`MEM_STORE` 配置项已移除。
 
 ## 6. 记忆设计原理（手机端实证版）
 
@@ -118,10 +112,14 @@ erase 语义），但 2.0 主力开发已被战略叫停（资源回 1.x 线）�
 token 估算口径（仅展示用）：CJK 1 字≈1 tok、ASCII 4 字符≈1 tok、
 图 1500 tok/张、累计记忆 = 引擎字符数 ÷2。
 
-## 7. 召回与重排：默认档与深度档
+## 7. 召回与重排：cheap 默认档与深度档
 
-- **默认档**：引擎 recall top-5 证据 + 滑窗 8 条直接装配。**零 LLM 附加成本**。
-  bench 同口径覆盖率 0.557（sample50；bench 的 cheap 特征档同为零-LLM 最优形态）。
+- **默认档 = cheap 特征重排（3.0 起默认启用）**：建 session 时 `CheapRerank.ensureLoaded`
+  把 `assets/cheap_model.json`（bench cheap_model_v2 同模型，11 特征逻辑回归）注入 JNI；
+  recall 在原生侧走 **候选池 60 → cheap 特征重排 → top-5**（`ame_jni.cpp` `cheap_rerank`，
+  与 bench `--rerank cheap` 同口径：BM25 分/排名、fusion/graph/ctx/time、recency、
+  实体重合等题内归一 + 逻辑回归）。**零 LLM、纯 CPU、毫秒级**（PC 实测相对 bm25
+  +1ms/题量级）；模型加载失败自动回退引擎原序。bench 同档覆盖率 0.557（sample50）。
 - **深度档**（手动开关，蓝底按钮）：召回池扩到 60 → M3 一次批量打分选 top-5
   （`MiniMaxClient.rerank`）。bench 覆盖率 0.672 / judge 0.73。
   **为什么默认关**：七条非-LLM 路线（词级六轮/特征学习/七关系公式/双编码器
@@ -162,8 +160,7 @@ prompt 注入前 8000 字，截断外细节靠 recall 命中已灌入的方案�
 | 旋钮 | 位置 | 默认 | 说明 |
 |---|---|---|---|
 | 滑窗/证据数 | local.properties | 8 / 5 | 状态栏同步显示 |
-| 存储后端 | local.properties | graph | lmem 需整体验证后再切默认 |
-| 后端切换 | build.gradle | — | `MEM_STORE` 见上 |
+| 默认重排 | assets/cheap_model.json | cheap 开 | 池60→11特征重排→topN；删模型即回退引擎原序 |
 | 深度档 | UI 手动 | 关 | 每轮 +1 次 LLM 调用 |
 | 联网 | UI 手动 | 关 | 每轮 +1 次搜索调用 |
 | 导游方案截断 | MemoryOrchestrator.PROMPT_CHARS | 8000 | 方案注入上限 |
