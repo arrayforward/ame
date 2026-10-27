@@ -357,6 +357,9 @@ pgvector HNSW 余弦、邻居索引、词法候选 OR ILIKE），支持较大数
 - 一键验证：`docker compose -f storage/pg/docker-compose.yml up --abort-on-container-exit build`
   （pgvector db + Linux 构建容器，ON 编译 + `test_pg_storage` 对照断言）。
 - bench：`--pg-conn ... [--pg-ns 前缀]`，每 case 独立 ns 并先清库，对照内存管线。
+- **租户知识库**：`session.attach_tenant(&tenant)` 后 recall 自动合并租户共享证据
+  （按分融合去重），共同记忆写租户 ns；不同租户共享/私有全部按 ns 隔离，
+  detach 恢复完全私有（`test_pg_storage` 租户用例覆盖）。
 - `get_node_mut` 全部 7 处既有调用点已补 `put_node` 写回（PG 写穿的前提）。
 
 **验证（2026-10-27，Docker pgvector/pg16 + Linux 构建）**：ON 编译 ctest 15/16 绿

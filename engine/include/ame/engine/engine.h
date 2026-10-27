@@ -65,6 +65,12 @@ class Engine {
     return storage_.connect_pg(conninfo, ns);
   }
 
+  // 4.0 租户共享记忆：attach 后本 session 的 recall 自动合并租户引擎证据
+  // （非拥有指针，生命周期由调用方保证；共同记忆写入直接调 tenant->remember_turn，
+  // 仍各自 ns 隔离存储；lookup/实体档案等其它动词保持 session 私有）。
+  void attach_tenant(Engine* tenant) { tenant_ = tenant; }
+  void detach_tenant() { tenant_ = nullptr; }
+
   // ① 注册实体
   std::string register_entity(const std::string& type, const std::string& name,
                               const Attrs& identifiers = {},
@@ -145,6 +151,7 @@ class Engine {
 
  private:
   Storage storage_;
+  Engine* tenant_ = nullptr;  // 4.0 租户知识库（非拥有；attach_tenant 注入）
   VectorService vector_;
   TimeService time_;
   KeywordManager keyword_;

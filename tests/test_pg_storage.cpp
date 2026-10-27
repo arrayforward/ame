@@ -6,6 +6,7 @@
  *       词法候选下推、快照导出→另一 ns 导入往返、clear_ns。
  */
 #include "ame/storage/storage.h"
+#include "ame/engine/engine.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -125,6 +126,35 @@ int main() {
   CHECK(st3.from_json(Json::object()) == Err::Ok);
   CHECK(st3.pg_index_size() == 0 && st3.pg_cache_size() == 0);
   unsetenv("AME_PG_CACHE_NODES");
+
+  // ---- 租户知识库：同租户 session 共享；不同租户共享/私有全部隔离 ----
+  {
+    Engine t1, t2, s1;
+    CHECK(t1.open_postgres(conn, "tenant_t1") == Err::Ok);
+    CHECK(t2.open_postgres(conn, "tenant_t2") == Err::Ok);
+    CHECK(s1.open_postgres(conn, "tenant_t1_session_s1") == Err::Ok);
+    for (Storage* st : {&t1.storage(), &t2.storage(), &s1.storage()})
+      CHECK(st->from_json(Json::object()) == Err::Ok);
+    CHECK(t1.remember_turn("user", "tenant one knowledge zephyrus", 100).code == Err::Ok);
+    CHECK(t2.remember_turn("user", "tenant two secret wombat", 100).code == Err::Ok);
+    CHECK(s1.remember_turn("user", "session private quokka", 100).code == Err::Ok);
+    SeedQuery q1; q1.text = "zephyrus";
+    SeedQuery q2; q2.text = "wombat";
+    SeedQuery q3; q3.text = "quokka";
+    auto has = [](Engine& e, SeedQuery& q, const char* needle) {
+      for (auto& ev : e.recall(q, {}, 2, 5, false).events)
+        if (ev.event && ev.event->text.find(needle) != std::string::npos) return true;
+      return false;
+    };
+    CHECK(!has(s1, q1, "zephyrus"));  // 未 attach：看不到租户知识库
+    CHECK(!has(s1, q2, "wombat"));    // 其它租户永远不可见
+    s1.attach_tenant(&t1);
+    CHECK(has(s1, q1, "zephyrus"));   // 同租户共享知识库命中
+    CHECK(!has(s1, q2, "wombat"));    // attach t1 后也看不到 t2 的共同记忆
+    CHECK(has(s1, q3, "quokka"));     // 本 session 私有记忆不受影响
+    s1.detach_tenant();
+    CHECK(!has(s1, q1, "zephyrus"));  // detach 恢复完全私有
+  }
 
   if (failures == 0) std::printf("PASS test_pg_storage（全部对照断言通过）\n");
   return failures == 0 ? 0 : 1;

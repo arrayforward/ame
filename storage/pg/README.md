@@ -69,6 +69,25 @@ bench：`--pg-conn "host=... dbname=ame user=postgres password=ame" [--pg-ns 前
    sample50 单 case 摄入约 4 分钟（内存版秒级）。批量摄入包事务 + 预检缓存是
    已识别的后续优化，不影响检索正确性。
 
+## 租户知识库（session 隔离之上的共享层）
+
+- **模型**：租户 = 独立 ns 的知识库引擎；session = 各自独立 ns 的私有引擎。
+  不同租户的共同记忆、不同租户的 session、同租户不同 session 的私有记忆，
+  在表主键/查询/索引/缓存各层全部按 ns 隔离。
+- **用法**：
+  ```cpp
+  Engine tenant, session;
+  tenant.open_postgres(conninfo, "tenant_" + tenant_id);
+  session.open_postgres(conninfo, "tenant_" + tenant_id + "_session_" + session_id);
+  tenant.remember_turn(...);          // 共同记忆写租户库（任何 session 都可贡献）
+  session.attach_tenant(&tenant);     // 之后 session.recall 自动合并租户证据
+  // session.detach_tenant() 即恢复完全私有
+  ```
+- **合并语义**：recall 对私有/共享分别跑完整管道，再按分数降序合并、按 uid 去重、
+  截 limit；共享未命中不影响私有结果。lookup/实体档案等其它动词保持 session 私有。
+- **验证**：`test_pg_storage` 租户用例断言——未 attach 不可见共享、attach 命中共享、
+  其它租户共享永不可见、私有不受影响、detach 恢复隔离。
+
 ## 文件
 
 - `pg_backend.h/.cpp`：后端实现（Storage 公开方法 `if (pg_)` 分流，调用方零改动）。
