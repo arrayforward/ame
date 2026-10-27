@@ -15,6 +15,9 @@ endif()
 
 enable_testing()
 
+# 4.0：PostgreSQL 存储后端（默认 OFF，Android/默认构建零影响）
+option(AME_WITH_POSTGRES "Enable PostgreSQL storage backend (libpq)" OFF)
+
 # 模块依赖：core ← storage ← time/vector ← keyword/extractor ← entity/graph_writer
 #          ← seed/diffusion ← rerank ← thinker ← feedback/learning ← engine
 add_subdirectory(core)          # 公共类型/uid/JSON/日志

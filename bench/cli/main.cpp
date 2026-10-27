@@ -57,6 +57,8 @@ struct Cli {
   std::string cheap_rerank;    // --cheap-rerank PATH：特征逻辑重排器模型 JSON（空=关）
   std::string rerank_mode;     // --rerank bm25|cheap|llm（3.0 刀5：别名收敛，仅此开关）
   bool has_final = false;      // --final-alpha/--final-beta：L2 终排混合开关（默认关闭）
+  std::string pg_conn;         // --pg-conn URI：4.0 PostgreSQL 后端（默认空=内存）
+  std::string pg_ns = "default";  // --pg-ns：库内命名空间前缀（实际 ns=前缀.caseId）
 };
 
 // parse_args 伪代码：键值扫描，未知键忽略；--abstain-categories 为逗号分隔整数列表。
@@ -106,6 +108,8 @@ Cli parse_args(int argc, char** argv) {
       cli.cfg.final_beta = std::atof(next().c_str());
       cli.has_final = cli.cfg.final_mix = true;
     }
+    else if (a == "--pg-conn") cli.pg_conn = next();   // 4.0 PG 后端（需 AME_WITH_POSTGRES 构建）
+    else if (a == "--pg-ns") cli.pg_ns = next();
     else if (a == "--abstain-categories") {
       cli.cfg.abstention_categories.clear();
       std::string v = next();
@@ -325,6 +329,17 @@ int main(int argc, char** argv) {
       if (!any) continue;
     }
     Engine e;  // 跨 case 隔离：每 case 用完即销毁，避免百级 case 全量图驻留
+    if (!cli.pg_conn.empty()) {
+      // 4.0 PG 后端：ns=前缀.caseId 隔离；每 case 先清 ns，与内存版"全新 Engine"同语义
+      if (e.open_postgres(cli.pg_conn, cli.pg_ns + "." + c.conversation_id) != Err::Ok) {
+        std::fprintf(stderr, "[pg] 连接/建库失败（需 AME_WITH_POSTGRES 构建 + pgvector）\n");
+        return 1;
+      }
+      if (e.storage().from_json(Json::object()) != Err::Ok) {
+        std::fprintf(stderr, "[pg] ns 清空失败\n");
+        return 1;
+      }
+    }
 
     IngestStats st;
     // --load-graph：整图（含档案槽位）已落盘则直接加载，跳过摄入与 LLM 提取（零调用）

@@ -59,6 +59,12 @@ class Engine {
   // data_dir 非空时启用 M11 反馈日志与 M14 配置目录
   explicit Engine(const std::string& data_dir = "");
 
+  // 4.0：启用 PostgreSQL 存储后端（构造后、写入前调用；ns 为 session 隔离命名空间）。
+  // 需以 AME_WITH_POSTGRES 编译，否则返回 Internal；成功后 recall/remember 全走 SQL。
+  Err open_postgres(const std::string& conninfo, const std::string& ns = "default") {
+    return storage_.connect_pg(conninfo, ns);
+  }
+
   // ① 注册实体
   std::string register_entity(const std::string& type, const std::string& name,
                               const Attrs& identifiers = {},

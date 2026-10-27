@@ -21,11 +21,14 @@
 #include "ame/core/types.h"
 #include "ame/core/json.h"
 
+#include <memory>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
 namespace ame {
+
+class PgBackend;  // 4.0：PostgreSQL 后端（AME_WITH_POSTGRES 时实现于 storage/pg/）
 
 // geohash 编码（base32，供 Region 按前缀自动挂载）
 std::string geohash_encode(double lat, double lng, int precision = 6);
@@ -33,6 +36,9 @@ double haversine_m(double lat1, double lng1, double lat2, double lng2);
 
 class Storage {
  public:
+  Storage();   // pimpl 默认构造亦需完整类型（定义在 storage.cpp）
+  ~Storage();  // pg_ 前向声明的 unique_ptr 析构需完整类型（定义在 storage.cpp）
+
   // upsert 节点；uid 为空则报错
   Err put_node(const Node& n);
   // 写入边；同 (from,to,type) 已存在则累加/更新（见 merge_edge）
@@ -72,9 +78,19 @@ class Storage {
   const Node* find_by_attr(NodeKind kind, const std::string& key, const std::string& val) const;
 
   std::vector<const Node*> nodes_of_kind(NodeKind k) const;
-  // 返回节点总数（trivial getter）
-  size_t node_count() const { return nodes_.size(); }
+  // 返回节点总数（pg 模式为 SQL count）
+  size_t node_count() const;
   size_t edge_count() const;
+
+  // ---- 4.0 PostgreSQL 后端（默认不启用；AME_WITH_POSTGRES 编译开关）----
+  // 连接并幂等建表；ns 为命名空间（session 隔离，默认 default）。成功后
+  // 全部读写改走 SQL（检索下推），内存 nodes_/邻接表不再使用。
+  Err connect_pg(const std::string& conninfo, const std::string& ns);
+  bool pg_active() const;
+  // 词法事件候选：pg 模式 OR ILIKE 下推（避免 Event 全表拉取）；
+  // 内存模式返回空（seed 走原全扫路径，行为不变）
+  std::vector<const Node*> lexical_event_candidates(const std::vector<std::string>& words,
+                                                    int limit) const;
 
   // JSON 快照
   Err save(const std::string& path) const;
@@ -92,6 +108,9 @@ class Storage {
   // 名字索引："kind|name" -> 同名节点 uid 列表（put_node/load 时维护，无删除语义）
   std::unordered_map<std::string, std::vector<std::string>> name_index_;
   mutable std::shared_mutex mu_;
+#ifdef AME_WITH_POSTGRES
+  std::unique_ptr<PgBackend> pg_;  // 非空即数据库模式（4.0）
+#endif
 };
 
 }  // namespace ame

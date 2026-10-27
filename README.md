@@ -340,3 +340,32 @@ JNI（`AmeEngine.loadCheapModel`），recall 在原生侧走 候选池60 → 11 
 零 LLM、毫秒级；加载失败自动回退引擎原序（bm25 行为）。手动"深度重排"开关不变，
 开启时由 Java 侧 M3 全池语义打分（llm 档）。文档已同步：设计文档被裁节就地标注
 "[3.0 已裁]"，2.0 分层架构稿标注裁撤归档，工程文档/目录树/CLI 参数均为现行口径。
+
+---
+
+## 4.0 PostgreSQL 存储后端（dev-4.0）
+
+M9 在内存图 + JSON 快照之外新增 **PostgreSQL 后端**（默认 OFF，Android/默认构建零影响）：
+节点/边规范化存 `ame_nodes/ame_edges`，**检索下推 SQL**（名字/属性 btree+GIN、
+pgvector HNSW 余弦、邻居索引、词法候选 OR ILIKE），支持较大数据量而不整图内存化。
+`Storage` 内部 `if (pg_)` 分流，调用方零改动；`Engine::open_postgres(conninfo, ns)`
+一行切换，ns 对应 session 隔离；老 graph.json 经 `load()` 替换式迁库，快照仍可导出备份。
+
+- 实现与语义差异（读穿缓存不淘汰、词法候选池内 df/idf、mut 后必须 put_node）：
+  **[storage/pg/README.md](storage/pg/README.md)**。
+- 一键验证：`docker compose -f storage/pg/docker-compose.yml up --abort-on-container-exit build`
+  （pgvector db + Linux 构建容器，ON 编译 + `test_pg_storage` 对照断言）。
+- bench：`--pg-conn ... [--pg-ns 前缀]`，每 case 独立 ns 并先清库，对照内存管线。
+- `get_node_mut` 全部 7 处既有调用点已补 `put_node` 写回（PG 写穿的前提）。
+
+**验证（2026-10-27，Docker pgvector/pg16 + Linux 构建）**：ON 编译 ctest 15/16 绿
+（test_bench 预存 UB 与基线一致，Windows/Linux 均复现），`test_pg_storage` 对真实
+库全断言通过；默认 OFF Windows 构建+ctest 同基线。sample50 内存 vs PG 对照
+（entity-pass 0.5 + guard 0.2，baseline 作答）：
+
+| 档 | 内存 | PG（候选 400） | PG（候选 2000，采用值） |
+|---|---|---|---|
+| bm25 覆盖率 | 0.521 | 0.500 | 0.500（Δ0.021，噪声带沿） |
+| cheap 覆盖率 | 0.583 | 0.542 | **0.583（与内存逐位一致）** |
+
+400→2000 的候选上限调整即由 cheap 差距实验驱动；写入吞吐限制见 storage/pg/README。

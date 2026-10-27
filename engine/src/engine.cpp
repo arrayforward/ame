@@ -169,6 +169,7 @@ RememberResult Engine::remember_turn_ex(Extraction ex, const std::string& speake
       if (!dia_id.empty()) ev->attrs["dia_id"] = dia_id;
       if (!session_id.empty()) ev->attrs["session_id"] = session_id;
       if (!speaker.empty()) ev->attrs["speaker"] = speaker;
+      storage_.put_node(*ev);  // 4.0：PG 写穿（内存模式为同值覆盖，无副作用）
     }
   }
   return r;

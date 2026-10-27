@@ -1,0 +1,33 @@
+# 4.0 PostgreSQL 后端开发/验证环境：pgvector 数据库 + Linux 构建容器。
+# 用法（仓库根或本目录均可）：
+#   docker compose -f storage/pg/docker-compose.yml up --abort-on-container-exit build
+# build 容器自动：装 libpq/cmake → AME_WITH_POSTGRES=ON 构建 → 对 db 跑 test_pg_storage。
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: ame
+      POSTGRES_DB: ame
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ame"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "55432:5432"   # 本机直连调试用：host=localhost port=55432 dbname=ame user=postgres password=ame
+  build:
+    image: debian:bookworm
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ../..:/src
+    working_dir: /src
+    command: >
+      bash -c "sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org/debian-security|mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true;
+      apt-get update -qq &&
+      apt-get install -y -qq cmake g++ ninja-build libpq-dev postgresql-client &&
+      cmake -S . -B build-pg -G Ninja -DAME_WITH_POSTGRES=ON -DCMAKE_BUILD_TYPE=Release &&
+      cmake --build build-pg &&
+      AME_PG_CONN='host=db dbname=ame user=postgres password=ame'
+      ctest --test-dir build-pg --output-on-failure"

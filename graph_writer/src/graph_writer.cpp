@@ -175,6 +175,7 @@ WriteResult GraphWriter::write_event(
     if (kn && kn->status == 1) kn->status = 0;
     if (kn && kn->embedding.empty())
       kn->embedding = vec_.embed(kn->name + " " + kn->type);
+    if (kn) storage_.put_node(*kn);  // 4.0：PG 写穿
   }
 
   // ---- NEXT 叙事时间链 ----
@@ -217,7 +218,10 @@ void GraphWriter::supersede_pass(const Node& ev, const std::vector<std::string>&
       if (old->attrs.count("valid_to")) continue;  // 已被取代
       for (auto& euid : entity_uids) {
         if (!storage_.find_edge(old->uid, euid, RelType::INVOLVES)) continue;
-        storage_.get_node_mut(old->uid)->attrs["valid_to"] = std::to_string(ev.ts);
+        if (Node* om = storage_.get_node_mut(old->uid)) {
+          om->attrs["valid_to"] = std::to_string(ev.ts);
+          storage_.put_node(*om);  // 4.0：PG 写穿
+        }
         storage_.put_edge(Edge{ev.uid, old->uid, RelType::SUPERSEDES, 1.0,
                                {{"slot", kn->name}, {"entity", euid}}});
         break;  // 一个旧事件只需被取代一次
@@ -276,12 +280,16 @@ void GraphWriter::auto_grow(const Node& ev, const std::vector<std::string>& enti
     Node* m = storage_.get_node_mut(ev.uid);
     m->attrs["local_period"] = lp.period;
     if (lp.after_hours) m->attrs["after_hours"] = "1";
+    storage_.put_node(*m);  // 4.0：PG 写穿
   }
   for (auto& euid : entity_uids) {
     std::string phase = ts_.match_phase(ev.ts, euid);
     if (!phase.empty()) {
       Node* m = storage_.get_node_mut(ev.uid);
-      if (m->attrs["phase"].empty()) m->attrs["phase"] = phase;
+      if (m->attrs["phase"].empty()) {
+        m->attrs["phase"] = phase;
+        storage_.put_node(*m);  // 4.0：PG 写穿
+      }
     }
   }
 }

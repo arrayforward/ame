@@ -29,7 +29,47 @@
 #include <shared_mutex>
 #include <sstream>
 
+#ifdef AME_WITH_POSTGRES
+#include "../pg/pg_backend.h"
+#endif
+
 namespace ame {
+
+Storage::Storage() = default;
+Storage::~Storage() = default;
+
+// ---- 4.0 PostgreSQL 后端接线：connect_pg 成功后全部方法分流到 PgBackend ----
+Err Storage::connect_pg(const std::string& conninfo, const std::string& ns) {
+#ifdef AME_WITH_POSTGRES
+  auto pg = std::make_unique<PgBackend>();
+  Err r = pg->connect(conninfo, ns);
+  if (r != Err::Ok) return r;
+  std::unique_lock lk(mu_);
+  pg_ = std::move(pg);
+  return Err::Ok;
+#else
+  (void)conninfo; (void)ns;
+  return Err::Internal;  // 未以 AME_WITH_POSTGRES 编译
+#endif
+}
+
+bool Storage::pg_active() const {
+#ifdef AME_WITH_POSTGRES
+  return pg_ != nullptr;
+#else
+  return false;
+#endif
+}
+
+std::vector<const Node*> Storage::lexical_event_candidates(
+    const std::vector<std::string>& words, int limit) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->lexical_event_candidates(words, limit);
+#else
+  (void)words; (void)limit;
+#endif
+  return {};  // 内存模式：seed 走原全扫路径
+}
 
 // ---------------- geohash / haversine ----------------
 static const char* kGh = "0123456789bcdefghjkmnpqrstuvwxyz";
@@ -80,6 +120,9 @@ double haversine_m(double lat1, double lng1, double lat2, double lng2) {
 //   步骤2：取独占锁，按 uid 覆盖写入 nodes_；
 //   步骤3：维护名字索引（同 uid 同名不重复登记）。
 Err Storage::put_node(const Node& n) {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->put_node(n);
+#endif
   if (n.uid.empty()) return Err::InvalidArg;
   std::unique_lock lk(mu_);
   nodes_[n.uid] = n;
@@ -100,6 +143,9 @@ Err Storage::put_edge(const Edge& e) { return upsert_edge(e, false); }
 //          未找到则整体 push_back 新边；
 //   步骤4：对 out_[from] 与 in_[to] 各执行一次 upd，保证双表一致。
 Err Storage::upsert_edge(const Edge& e, bool add_weight) {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->upsert_edge(e, add_weight);
+#endif
   if (e.from.empty() || e.to.empty()) return Err::InvalidArg;
   std::unique_lock lk(mu_);
   if (!nodes_.count(e.from) || !nodes_.count(e.to)) return Err::NotFound;
@@ -122,6 +168,9 @@ Err Storage::upsert_edge(const Edge& e, bool add_weight) {
 //   步骤1：取共享锁，查 from 的出边表，不存在返回 nullptr；
 //   步骤2：线性扫描出边，命中三元组相同者返回其地址，否则 nullptr。
 const Edge* Storage::find_edge(const std::string& from, const std::string& to, RelType t) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->find_edge(from, to, t);
+#endif
   std::shared_lock lk(mu_);
   auto it = out_.find(from);
   if (it == out_.end()) return nullptr;
@@ -132,6 +181,9 @@ const Edge* Storage::find_edge(const std::string& from, const std::string& to, R
 
 // 按 uid 查节点（共享锁），不存在返回 nullptr；返回指针仅在持锁期间外谨慎使用
 const Node* Storage::get_node(const std::string& uid) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->get_node(uid);
+#endif
   std::shared_lock lk(mu_);
   auto it = nodes_.find(uid);
   return it == nodes_.end() ? nullptr : &it->second;
@@ -139,6 +191,9 @@ const Node* Storage::get_node(const std::string& uid) const {
 
 // 按 uid 查节点（独占锁，可写版本），不存在返回 nullptr
 Node* Storage::get_node_mut(const std::string& uid) {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->get_node_mut(uid);
+#endif
   std::unique_lock lk(mu_);
   auto it = nodes_.find(uid);
   return it == nodes_.end() ? nullptr : &it->second;
@@ -154,6 +209,9 @@ Node* Storage::get_node_mut(const std::string& uid) {
 //          视角）并在 attrs 标记 _reversed=1，再 push(r, e.from)。
 std::vector<std::pair<Edge, const Node*>> Storage::neighbors(
     const std::string& uid, const std::vector<RelType>* rel_types) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->neighbors(uid, rel_types);
+#endif
   std::shared_lock lk(mu_);
   std::vector<std::pair<Edge, const Node*>> res;
   auto want = [&](RelType t) {
@@ -206,6 +264,9 @@ double Storage::cosine(const Vec& a, const Vec& b) {
 //         （均按相似度降序）；
 //   步骤4：截断到 topk 后返回。
 std::vector<std::pair<std::string, double>> Storage::ann_search(const Vec& embedding, int topk) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->ann_search(embedding, topk);
+#endif
   std::shared_lock lk(mu_);
   std::vector<std::pair<std::string, double>> all;
   all.reserve(nodes_.size());
@@ -228,6 +289,9 @@ std::vector<std::pair<std::string, double>> Storage::ann_search(const Vec& embed
 //   步骤2：haversine 距离 <= radius_m 的节点收入结果；
 //   步骤3：按到查询点的距离升序排序后返回。
 std::vector<const Node*> Storage::geo_lookup(double lat, double lng, double radius_m) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->geo_lookup(lat, lng, radius_m);
+#endif
   std::shared_lock lk(mu_);
   std::vector<const Node*> res;
   for (auto& kv : nodes_) {
@@ -243,6 +307,9 @@ std::vector<const Node*> Storage::geo_lookup(double lat, double lng, double radi
 
 // 伪代码：按 kind+name 精确查找——走名字索引 O(1)，取同名列表首个，否则 nullptr
 const Node* Storage::find_by_name(NodeKind kind, const std::string& name) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->find_by_name(kind, name);
+#endif
   std::shared_lock lk(mu_);
   auto it = name_index_.find(std::to_string((int)kind) + "|" + name);
   if (it == name_index_.end() || it->second.empty()) return nullptr;
@@ -253,6 +320,9 @@ const Node* Storage::find_by_name(NodeKind kind, const std::string& name) const 
 // 伪代码：按 kind+name 枚举全部同名节点——名字索引取出 uid 列表逐个解析
 std::vector<const Node*> Storage::find_all_by_name(NodeKind kind,
                                                    const std::string& name) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->find_all_by_name(kind, name);
+#endif
   std::shared_lock lk(mu_);
   std::vector<const Node*> res;
   auto it = name_index_.find(std::to_string((int)kind) + "|" + name);
@@ -268,6 +338,9 @@ std::vector<const Node*> Storage::find_all_by_name(NodeKind kind,
 //   步骤1：共享锁下全表扫描，kind 不符跳过；
 //   步骤2：节点 attrs 中含 key 且值等于 val 则返回该节点；扫完未命中返回 nullptr。
 const Node* Storage::find_by_attr(NodeKind kind, const std::string& key, const std::string& val) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->find_by_attr(kind, key, val);
+#endif
   std::shared_lock lk(mu_);
   for (auto& kv : nodes_) {
     const Node& n = kv.second;
@@ -280,6 +353,9 @@ const Node* Storage::find_by_attr(NodeKind kind, const std::string& key, const s
 
 // 伪代码：收集指定 kind 的全部节点：共享锁下全表扫描，kind 匹配者入结果
 std::vector<const Node*> Storage::nodes_of_kind(NodeKind k) const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->nodes_of_kind(k);
+#endif
   std::shared_lock lk(mu_);
   std::vector<const Node*> res;
   for (auto& kv : nodes_)
@@ -287,8 +363,20 @@ std::vector<const Node*> Storage::nodes_of_kind(NodeKind k) const {
   return res;
 }
 
+// 统计节点/边总数（pg 模式 SQL count，否则内存表计数）
+size_t Storage::node_count() const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->node_count();
+#endif
+  std::shared_lock lk(mu_);
+  return nodes_.size();
+}
+
 // 统计边总数：共享锁下累加各节点出边表长度（入边表为同一份数据的镜像，不计）
 size_t Storage::edge_count() const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->edge_count();
+#endif
   std::shared_lock lk(mu_);
   size_t n = 0;
   for (auto& kv : out_) n += kv.second.size();
@@ -373,6 +461,18 @@ static Json edge_to_json(const Edge& e) {
 // 伪代码：序列化为 JSON 对象（内存版，save 的纯数据部分）
 //   步骤1：取共享锁，全部节点 → nodes 数组、全部出边（入边为镜像不重复导出）→ edges 数组。
 Json Storage::to_json() const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) {  // 全表导出仅供备份/迁移（大库慎用）
+    Json root = Json::object();
+    Json jn = Json::array();
+    for (auto& n : pg_->all_nodes()) jn.push(node_to_json(n));
+    Json je = Json::array();
+    for (auto& e : pg_->all_edges()) je.push(edge_to_json(e));
+    root["nodes"] = std::move(jn);
+    root["edges"] = std::move(je);
+    return root;
+  }
+#endif
   std::shared_lock lk(mu_);
   Json root = Json::object();
   Json jn = Json::array();
@@ -390,6 +490,29 @@ Json Storage::to_json() const {
 //   步骤2：逐节点反序列化并同步重建名字索引；
 //   步骤3：逐边还原（type 由名字反查，无法识别跳过），重建双邻接表。
 Err Storage::from_json(const Json& root) {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) {  // 替换式载入：清 ns 后批量写库（老 graph.json 迁库同路径）
+    Err rc = pg_->clear_ns();
+    if (rc != Err::Ok) return rc;
+    if (auto* jn = root.find("nodes"))
+      for (auto& j : jn->arr)
+        if ((rc = pg_->put_node(node_from_json(j))) != Err::Ok) return rc;
+    if (auto* je = root.find("edges"))
+      for (auto& j : je->arr) {
+        Edge e;
+        e.from = j.find("from") ? j.find("from")->as_str() : "";
+        e.to = j.find("to") ? j.find("to")->as_str() : "";
+        auto t = rel_from_name(j.find("type") ? j.find("type")->as_str() : "");
+        if (!t) continue;
+        e.type = *t;
+        e.weight = j.find("weight") ? j.find("weight")->as_num(1.0) : 1.0;
+        if (auto* a = j.find("attrs"))
+          for (auto& kv : a->obj) e.attrs[kv.first] = kv.second.as_str();
+        if ((rc = pg_->upsert_edge(e, false)) != Err::Ok) return rc;
+      }
+    return Err::Ok;
+  }
+#endif
   std::unique_lock lk(mu_);
   nodes_.clear();
   out_.clear();

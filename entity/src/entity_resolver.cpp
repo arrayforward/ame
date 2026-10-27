@@ -243,6 +243,7 @@ ResolveResult EntityResolver::resolve(const std::string& surface,
     rr.suspected_dup = true;
     Node* m = storage_.get_node_mut(rr.uid);
     m->attrs["suspected_dup_of"] = best->uid;
+    storage_.put_node(*m);  // 4.0：PG 写穿
   }
   rr.mention_uid = create_mention(surface, rr.uid, rr.confidence);
   return rr;
@@ -297,10 +298,14 @@ Err EntityResolver::merge_entities(const std::string& uid_a, const std::string& 
   }
   Node* ma = storage_.get_node_mut(a);
   ma->attrs["merged_into"] = b;
+  storage_.put_node(*ma);  // 4.0：PG 写穿
   for (auto& kv : na->attrs) {  // 标识符并入 b
     if (kv.first.rfind("id:", 0) == 0) {
       Node* mb = storage_.get_node_mut(b);
-      if (!mb->attrs.count(kv.first)) mb->attrs[kv.first] = kv.second;
+      if (!mb->attrs.count(kv.first)) {
+        mb->attrs[kv.first] = kv.second;
+        storage_.put_node(*mb);  // 4.0：PG 写穿
+      }
     }
   }
   for (auto& e : moved) {

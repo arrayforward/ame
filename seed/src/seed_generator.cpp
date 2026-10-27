@@ -211,7 +211,19 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
       for (auto& w : qtoks)
         if (!kLexStop.count(w)) qcontent.insert(w);
       if (!qcontent.empty()) {
-        auto events = storage_.nodes_of_kind(NodeKind::Event);
+        // 4.0 PG 后端：词法候选 SQL 下推（含同义/近义扩展词，避免 Event 全表拉取）；
+        // df/idf 在候选池内统计（与内存全扫口径的差异见 storage/pg/README）
+        std::vector<std::string> lex_words;
+        if (storage_.pg_active()) {
+          for (auto& w : qcontent) {
+            lex_words.push_back(w);
+            for (auto& v : kw_.variants(kw_.normalize(w), 3)) lex_words.push_back(v);
+            for (auto& [v, sc] : kw_.near_words(kw_.normalize(w), 3)) lex_words.push_back(v);
+          }
+        }
+        auto events = storage_.pg_active()
+            ? storage_.lexical_event_candidates(lex_words, 2000)
+            : storage_.nodes_of_kind(NodeKind::Event);
         std::vector<std::unordered_set<std::string>> etoks;
         etoks.reserve(events.size());
         std::unordered_map<std::string, int> df;
@@ -303,7 +315,16 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
         for (auto& c : name_canons)
           if (std::find(cjks.begin(), cjks.end(), c) == cjks.end()) cjks.push_back(c);
         if (!cjks.empty()) {
-          auto events = storage_.nodes_of_kind(NodeKind::Event);
+          std::vector<std::string> lex_words;
+          if (storage_.pg_active()) {
+            for (auto& w : cjks) {
+              lex_words.push_back(w);
+              for (auto& v : kw_.variants(kw_.normalize(w), 8)) lex_words.push_back(v);
+            }
+          }
+          auto events = storage_.pg_active()
+              ? storage_.lexical_event_candidates(lex_words, 2000)
+              : storage_.nodes_of_kind(NodeKind::Event);
           std::unordered_map<std::string, int> df;
           std::unordered_map<std::string, std::pair<std::string, double>> expand_of;
           for (auto& w : cjks) {
@@ -396,7 +417,9 @@ SeedSet SeedGenerator::gen_seeds(const SeedQuery& q) {
             grams.push_back(g);
           }
           if (!grams.empty()) {
-            auto events = storage_.nodes_of_kind(NodeKind::Event);
+            auto events = storage_.pg_active()
+                ? storage_.lexical_event_candidates(grams, 2000)
+                : storage_.nodes_of_kind(NodeKind::Event);
             std::unordered_map<std::string, int> df;
             for (auto& g : grams)
               for (auto* n : events)

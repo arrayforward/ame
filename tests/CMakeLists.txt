@@ -32,3 +32,10 @@ add_test(NAME test_bench COMMAND test_bench)
 add_executable(test_llm test_llm.cpp)
 target_link_libraries(test_llm PRIVATE ame_llm ame_bench ame_engine)
 add_test(NAME test_llm COMMAND test_llm)
+
+# 4.0 PostgreSQL 后端对照测试（无 AME_PG_CONN 时自动 SKIP）
+if(AME_WITH_POSTGRES)
+  add_executable(test_pg_storage test_pg_storage.cpp)
+  target_link_libraries(test_pg_storage PRIVATE ame_engine)
+  add_test(NAME test_pg_storage COMMAND test_pg_storage)
+endif()
