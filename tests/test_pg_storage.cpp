@@ -99,6 +99,33 @@ int main() {
   CHECK(st.from_json(Json::object()) == Err::Ok);
   CHECK(st.node_count() == 0);
 
+  // ---- LRU 上限 + 换入换出 + 常驻索引（cap=3 强制频繁换出）----
+  setenv("AME_PG_CACHE_NODES", "3", 1);
+  Storage st3;
+  CHECK(st3.connect_pg(conn, "test_pg3") == Err::Ok);
+  CHECK(st3.from_json(Json::object()) == Err::Ok);
+  for (int i = 0; i < 6; ++i) {
+    Node n;
+    n.uid = "lru" + std::to_string(i);
+    n.kind = NodeKind::Entity;
+    n.name = "LRU" + std::to_string(i);
+    n.text = "body" + std::to_string(i);
+    CHECK(st3.put_node(n) == Err::Ok);
+  }
+  CHECK(st3.pg_index_size() == 6);  // 索引全量常驻，与换出无关
+  bool all_ok = true;
+  for (int i = 0; i < 6; ++i) {  // 被换出的旧节点 get_node 自动换入且数据正确
+    const Node* n = st3.get_node("lru" + std::to_string(i));
+    if (!n || n->text != "body" + std::to_string(i)) all_ok = false;
+  }
+  CHECK(all_ok);
+  CHECK(st3.pg_cache_size() <= 4);  // cap3 + 当次调用软溢出余量
+  CHECK(st3.find_by_name(NodeKind::Entity, "LRU5") != nullptr);  // 常驻名字索引免 SQL
+  CHECK(st3.pg_index_size() == 6);
+  CHECK(st3.from_json(Json::object()) == Err::Ok);
+  CHECK(st3.pg_index_size() == 0 && st3.pg_cache_size() == 0);
+  unsetenv("AME_PG_CACHE_NODES");
+
   if (failures == 0) std::printf("PASS test_pg_storage（全部对照断言通过）\n");
   return failures == 0 ? 0 : 1;
 }

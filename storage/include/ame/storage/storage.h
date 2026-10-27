@@ -87,6 +87,8 @@ class Storage {
   // 全部读写改走 SQL（检索下推），内存 nodes_/邻接表不再使用。
   Err connect_pg(const std::string& conninfo, const std::string& ns);
   bool pg_active() const;
+  size_t pg_cache_size() const;   // 数据缓存驻留节点数（非 PG 返回 0）
+  size_t pg_index_size() const;   // 常驻索引条目数（非 PG 返回 0）
   // 词法事件候选：pg 模式 OR ILIKE 下推（避免 Event 全表拉取）；
   // 内存模式返回空（seed 走原全扫路径，行为不变）
   std::vector<const Node*> lexical_event_candidates(const std::vector<std::string>& words,

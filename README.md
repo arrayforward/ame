@@ -351,7 +351,8 @@ pgvector HNSW 余弦、邻居索引、词法候选 OR ILIKE），支持较大数
 `Storage` 内部 `if (pg_)` 分流，调用方零改动；`Engine::open_postgres(conninfo, ns)`
 一行切换，ns 对应 session 隔离；老 graph.json 经 `load()` 替换式迁库，快照仍可导出备份。
 
-- 实现与语义差异（读穿缓存不淘汰、词法候选池内 df/idf、mut 后必须 put_node）：
+- 实现与语义差异（**常驻索引 + LRU 有界数据缓存换入换出**（`AME_PG_CACHE_NODES`，
+  默认 50000，防内存膨胀）、词法候选池内 df/idf、mut 后必须 put_node）：
   **[storage/pg/README.md](storage/pg/README.md)**。
 - 一键验证：`docker compose -f storage/pg/docker-compose.yml up --abort-on-container-exit build`
   （pgvector db + Linux 构建容器，ON 编译 + `test_pg_storage` 对照断言）。
@@ -369,3 +370,7 @@ pgvector HNSW 余弦、邻居索引、词法候选 OR ILIKE），支持较大数
 | cheap 覆盖率 | 0.583 | 0.542 | **0.583（与内存逐位一致）** |
 
 400→2000 的候选上限调整即由 cheap 差距实验驱动；写入吞吐限制见 storage/pg/README。
+
+**LRU 换入换出验证（同日）**：`test_pg_storage` 新增 cap=3 强制换出用例（索引常驻/
+换入正确性/清库）全过；sample50 PG cheap 在 `AME_PG_CACHE_NODES=1000` 下发生
+1544 次换出，无崩溃无悬空，覆盖率 0.562（vs 不限 0.583，uid 噪声带沿）。

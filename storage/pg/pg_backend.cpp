@@ -41,6 +41,32 @@ PgBackend::~PgBackend() {
   if (conn_) PQfinish(conn_);
 }
 
+PgBackend::CallScope::CallScope(const PgBackend* s) : self(s) {
+  if (self->depth_++ == 0) {
+    ++self->tick_;
+    self->evict_if_needed();  // 仅在调用边界换出，调用内部不换出
+  }
+}
+PgBackend::CallScope::~CallScope() { --self->depth_; }
+
+// LRU 换出：缓存到上限时按最近使用序淘汰最旧 10%（仅内存副本，库中数据不动；
+// 之后 get_node/query_nodes 未命中自动从库换入）。cap_=0 不限。
+void PgBackend::evict_if_needed() const {
+  if (cap_ == 0 || cache_.size() < cap_) return;
+  size_t target = cap_ - cap_ / 10 - 1;  // 换出约 10%
+  std::vector<std::pair<uint64_t, const std::string*>> ord;
+  ord.reserve(cache_.size());
+  for (auto& kv : cache_) ord.emplace_back(kv.second.used, &kv.first);
+  std::sort(ord.begin(), ord.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  size_t n_evict = cache_.size() - target;
+  for (size_t i = 0; i < n_evict && i < ord.size(); ++i) cache_.erase(*ord[i].second);
+  std::fprintf(stderr, "[pg] 缓存换出 %zu 条（cap=%zu 驻留=%zu，索引常驻=%zu，需要时自动换入）\n",
+               n_evict, cap_, cache_.size(), index_.size());
+}
+
+// 常驻索引维护见 put_node/clear_ns（uid->kind/name + kind|name->uids）
+
 PGresult* PgBackend::exec(const std::string& sql, const std::vector<std::string>& params) const {
   std::vector<const char*> vals;
   for (auto& p : params) vals.push_back(p.c_str());
@@ -103,6 +129,24 @@ Err PgBackend::connect(const std::string& conninfo, const std::string& ns) {
       return Err::Internal;
     }
   }
+  // 数据缓存上限：env AME_PG_CACHE_NODES（默认 50000，0=不限）；索引常驻全量装载
+  if (const char* cap = std::getenv("AME_PG_CACHE_NODES")) {
+    long v = std::atol(cap);
+    if (v >= 0) cap_ = (size_t)v;
+  }
+  PGresult* ri = exec("SELECT uid,kind,name FROM ame_nodes WHERE ns=$1", {ns_});
+  if (!ri) { PQfinish(conn_); conn_ = nullptr; return Err::IoError; }
+  for (int i = 0; i < PQntuples(ri); ++i) {
+    std::string uid = PQgetvalue(ri, i, 0);
+    IndexEntry ie;
+    ie.kind = (NodeKind)std::atoi(PQgetvalue(ri, i, 1));
+    ie.name = PQgetvalue(ri, i, 2);
+    index_[uid] = ie;
+    name_index_[i64((int)ie.kind) + "|" + ie.name].push_back(uid);
+  }
+  PQclear(ri);
+  std::fprintf(stderr, "[pg] 已连接 ns=%s：索引常驻 %zu 条，数据缓存上限 %zu（LRU 换入换出）\n",
+               ns_.c_str(), index_.size(), cap_);
   return Err::Ok;
 }
 
@@ -181,12 +225,13 @@ Edge PgBackend::row_to_edge(PGresult* r, int row) const {
 
 const Node* PgBackend::materialize(Node n) const {
   auto& slot = cache_[n.uid];
-  if (slot) {
-    *slot = std::move(n);  // 就地更新，已外发指针不失效
+  slot.used = tick_;
+  if (slot.node) {
+    *slot.node = std::move(n);  // 就地更新，已外发指针不失效
   } else {
-    slot = std::make_unique<Node>(std::move(n));
+    slot.node = std::make_unique<Node>(std::move(n));  // 未命中换入
   }
-  return slot.get();
+  return slot.node.get();
 }
 
 std::vector<const Node*> PgBackend::query_nodes(const std::string& sql,
@@ -204,6 +249,7 @@ std::vector<const Node*> PgBackend::query_nodes(const std::string& sql,
 Err PgBackend::put_node(const Node& n) {
   if (n.uid.empty()) return Err::InvalidArg;
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   const char* sql =
       "INSERT INTO ame_nodes(ns,uid,kind,type,name,text,ts,precision,importance,lat,lng,"
       "geohash,status,mention_count,attrs,embedding) VALUES("
@@ -222,20 +268,26 @@ Err PgBackend::put_node(const Node& n) {
   if (!r) return Err::IoError;
   PQclear(r);
   materialize(n);  // 写穿同步缓存
+  {  // 常驻索引同步（kind/name 变更时摘除旧名字项）
+    auto old = index_.find(n.uid);
+    if (old != index_.end() && (old->second.kind != n.kind || old->second.name != n.name)) {
+      std::string okey = i64((int)old->second.kind) + "|" + old->second.name;
+      auto& ov = name_index_[okey];
+      ov.erase(std::remove(ov.begin(), ov.end(), n.uid), ov.end());
+    }
+    index_[n.uid] = IndexEntry{n.kind, n.name};
+    auto& v = name_index_[i64((int)n.kind) + "|" + n.name];
+    if (std::find(v.begin(), v.end(), n.uid) == v.end()) v.push_back(n.uid);
+  }
   return Err::Ok;
 }
 
 Err PgBackend::upsert_edge(const Edge& e, bool add_weight) {
   if (e.from.empty() || e.to.empty()) return Err::InvalidArg;
   std::lock_guard<std::recursive_mutex> lk(mu_);
-  // 与内存版一致：两端节点必须存在
-  for (const std::string* uid : {&e.from, &e.to}) {
-    PGresult* r = exec("SELECT 1 FROM ame_nodes WHERE ns=$1 AND uid=$2 LIMIT 1", {ns_, *uid});
-    if (!r) return Err::IoError;
-    bool exists = PQntuples(r) > 0;
-    PQclear(r);
-    if (!exists) return Err::NotFound;
-  }
+  CallScope cs(this);
+  // 与内存版一致：两端节点必须存在（常驻索引 O(1)，免两次 SQL）
+  if (!index_.count(e.from) || !index_.count(e.to)) return Err::NotFound;
   const char* sql =
       "INSERT INTO ame_edges(ns,from_uid,to_uid,rel_type,weight,attrs) "
       "VALUES($1,$2,$3,$4,$5,$6::jsonb) "
@@ -251,6 +303,7 @@ Err PgBackend::upsert_edge(const Edge& e, bool add_weight) {
 
 const Edge* PgBackend::find_edge(const std::string& from, const std::string& to, RelType t) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   PGresult* r = exec(
       std::string("SELECT ") + kEdgeCols +
           " FROM ame_edges WHERE ns=$1 AND from_uid=$2 AND to_uid=$3 AND rel_type=$4 LIMIT 1",
@@ -267,8 +320,12 @@ const Edge* PgBackend::find_edge(const std::string& from, const std::string& to,
 
 const Node* PgBackend::get_node(const std::string& uid) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   auto it = cache_.find(uid);
-  if (it != cache_.end()) return it->second.get();
+  if (it != cache_.end()) {
+    it->second.used = tick_;  // 命中只更新 LRU，不打 SQL
+    return it->second.node.get();
+  }
   PGresult* r = exec(std::string("SELECT ") + kNodeCols +
                          " FROM ame_nodes WHERE ns=$1 AND uid=$2 LIMIT 1",
                      {ns_, uid});
@@ -286,6 +343,7 @@ Node* PgBackend::get_node_mut(const std::string& uid) {
 std::vector<std::pair<Edge, const Node*>> PgBackend::neighbors(
     const std::string& uid, const std::vector<RelType>* rel_types) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   std::vector<std::pair<Edge, const Node*>> res;
   auto want = [&](RelType t) {
     if (!rel_types) return true;
@@ -327,6 +385,7 @@ std::vector<std::pair<std::string, double>> PgBackend::ann_search(const Vec& emb
   std::vector<std::pair<std::string, double>> out;
   if (embedding.empty() || topk <= 0) return out;
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   std::string lit = vec_literal(embedding);
   PGresult* r = exec(
       "SELECT uid, 1-(embedding <=> $2::vector) AS sim FROM ame_nodes "
@@ -344,6 +403,7 @@ std::vector<std::pair<std::string, double>> PgBackend::ann_search(const Vec& emb
 
 std::vector<const Node*> PgBackend::geo_lookup(double lat, double lng, double radius_m) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   // Place 量级小：按 kind 取出后 C++ haversine 过滤（R-tree/PostGIS 留后续）
   auto places = query_nodes(std::string("SELECT ") + kNodeCols +
                                 " FROM ame_nodes WHERE ns=$1 AND kind=$2",
@@ -359,23 +419,29 @@ std::vector<const Node*> PgBackend::geo_lookup(double lat, double lng, double ra
 
 const Node* PgBackend::find_by_name(NodeKind kind, const std::string& name) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
-  auto v = query_nodes(std::string("SELECT ") + kNodeCols +
-                           " FROM ame_nodes WHERE ns=$1 AND kind=$2 AND name=$3 LIMIT 1",
-                       {ns_, i64((int)kind), name});
-  return v.empty() ? nullptr : v[0];
+  CallScope cs(this);
+  // 常驻名字索引免 SQL；节点数据未命中时按需换入
+  auto it = name_index_.find(i64((int)kind) + "|" + name);
+  if (it == name_index_.end() || it->second.empty()) return nullptr;
+  return get_node(it->second.front());
 }
 
 std::vector<const Node*> PgBackend::find_all_by_name(NodeKind kind,
                                                      const std::string& name) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
-  return query_nodes(std::string("SELECT ") + kNodeCols +
-                         " FROM ame_nodes WHERE ns=$1 AND kind=$2 AND name=$3",
-                     {ns_, i64((int)kind), name});
+  CallScope cs(this);
+  std::vector<const Node*> out;
+  auto it = name_index_.find(i64((int)kind) + "|" + name);
+  if (it == name_index_.end()) return out;
+  for (auto& uid : it->second)
+    if (const Node* n = get_node(uid)) out.push_back(n);
+  return out;
 }
 
 const Node* PgBackend::find_by_attr(NodeKind kind, const std::string& key,
                                     const std::string& val) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   // JSONB 包含查询（GIN 可索引）：attrs @> {"key":"val"}
   Json cond = Json::object();
   cond[key] = Json::string(val);
@@ -387,6 +453,7 @@ const Node* PgBackend::find_by_attr(NodeKind kind, const std::string& key,
 
 std::vector<const Node*> PgBackend::nodes_of_kind(NodeKind k) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   return query_nodes(std::string("SELECT ") + kNodeCols + " FROM ame_nodes WHERE ns=$1 AND kind=$2",
                      {ns_, i64((int)k)});
 }
@@ -395,6 +462,7 @@ std::vector<const Node*> PgBackend::lexical_event_candidates(
     const std::vector<std::string>& words, int limit) const {
   if (words.empty() || limit <= 0) return {};
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   std::string sql = std::string("SELECT ") + kNodeCols +
                     " FROM ame_nodes WHERE ns=$1 AND kind=" + i64((int)NodeKind::Event) +
                     " AND (text ILIKE '%'||$2||'%'";
@@ -410,6 +478,7 @@ std::vector<const Node*> PgBackend::lexical_event_candidates(
 
 size_t PgBackend::node_count() const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   PGresult* r = exec("SELECT count(*) FROM ame_nodes WHERE ns=$1", {ns_});
   if (!r) return 0;
   size_t n = (size_t)std::atoll(PQgetvalue(r, 0, 0));
@@ -419,6 +488,7 @@ size_t PgBackend::node_count() const {
 
 size_t PgBackend::edge_count() const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   PGresult* r = exec("SELECT count(*) FROM ame_edges WHERE ns=$1", {ns_});
   if (!r) return 0;
   size_t n = (size_t)std::atoll(PQgetvalue(r, 0, 0));
@@ -428,6 +498,7 @@ size_t PgBackend::edge_count() const {
 
 Err PgBackend::clear_ns() {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   PGresult* r = exec("DELETE FROM ame_edges WHERE ns=$1", {ns_});
   if (!r) return Err::IoError;
   PQclear(r);
@@ -435,11 +506,14 @@ Err PgBackend::clear_ns() {
   if (!r) return Err::IoError;
   PQclear(r);
   cache_.clear();
+  index_.clear();
+  name_index_.clear();
   return Err::Ok;
 }
 
 std::vector<Node> PgBackend::all_nodes() const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   std::vector<Node> out;
   PGresult* r = exec(std::string("SELECT ") + kNodeCols + " FROM ame_nodes WHERE ns=$1", {ns_});
   if (!r) return out;
@@ -451,6 +525,7 @@ std::vector<Node> PgBackend::all_nodes() const {
 
 std::vector<Edge> PgBackend::all_edges() const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
   std::vector<Edge> out;
   PGresult* r = exec(std::string("SELECT ") + kEdgeCols + " FROM ame_edges WHERE ns=$1", {ns_});
   if (!r) return out;

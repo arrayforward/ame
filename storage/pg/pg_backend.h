@@ -58,6 +58,8 @@ class PgBackend {
                                                     int limit) const;
   size_t node_count() const;
   size_t edge_count() const;
+  size_t cache_size() const { return cache_.size(); }   // 数据缓存驻留节点数（诊断/测试）
+  size_t index_size() const { return index_.size(); }   // 常驻索引条目数（诊断/测试）
 
   // 快照导出用全量读取（大库慎用，仅供备份/迁移）
   std::vector<Node> all_nodes() const;
@@ -66,11 +68,20 @@ class PgBackend {
   Err clear_ns();
 
  private:
+  // 调用边界守卫：最外层公开调用开始时 tick_++ 并触发 LRU 换出；
+  // 调用内部不换出，保证本次调用返回的 Node* 在调用期间绝不被淘汰
+  struct CallScope {
+    const PgBackend* self;
+    explicit CallScope(const PgBackend* s);
+    ~CallScope();
+  };
+  void evict_if_needed() const;  // LRU：超上限时最久未用的一批换出（库中有全量数据）
+
   // 以下 helper 均不持锁，公开方法入口统一 lock_guard(mu_)
   PGresult* exec(const std::string& sql, const std::vector<std::string>& params) const;
   Node row_to_node(PGresult* r, int row) const;
   Edge row_to_edge(PGresult* r, int row) const;
-  // 读穿物化：已缓存直接返回（put_node 负责写时同步），否则插入新副本
+  // 读穿物化：已缓存直接返回（put_node 负责写时同步），否则插入新副本（换入）
   const Node* materialize(Node n) const;
   std::vector<const Node*> query_nodes(const std::string& sql,
                                        const std::vector<std::string>& params) const;
@@ -79,10 +90,24 @@ class PgBackend {
   static Json attrs_to_json(const Attrs& a);
   static Attrs attrs_from_json(const char* s);
 
+  struct CacheEntry {
+    std::unique_ptr<Node> node;
+    uint64_t used = 0;  // 最近使用 tick（LRU）
+  };
+  struct IndexEntry {
+    NodeKind kind = NodeKind::Event;
+    std::string name;  // 轻量常驻索引：uid -> kind/name（连接时全量装载，写时维护）
+  };
+
   PGconn* conn_ = nullptr;
   std::string ns_;
+  size_t cap_ = 50000;                 // 数据缓存节点上限（AME_PG_CACHE_NODES，0=不限）
+  mutable uint64_t tick_ = 0;
+  mutable int depth_ = 0;              // CallScope 嵌套深度（仅最外层触发换出）
   mutable std::recursive_mutex mu_;
-  mutable std::unordered_map<std::string, std::unique_ptr<Node>> cache_;
+  mutable std::unordered_map<std::string, CacheEntry> cache_;
+  mutable std::unordered_map<std::string, IndexEntry> index_;
+  mutable std::unordered_map<std::string, std::vector<std::string>> name_index_;  // "kind|name"->uids
   mutable std::unique_ptr<Edge> edge_cache_;  // find_edge 返回指针的持有处（每次调用覆写）
 };
 

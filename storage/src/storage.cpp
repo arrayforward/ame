@@ -61,6 +61,20 @@ bool Storage::pg_active() const {
 #endif
 }
 
+size_t Storage::pg_cache_size() const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->cache_size();
+#endif
+  return 0;
+}
+
+size_t Storage::pg_index_size() const {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->index_size();
+#endif
+  return 0;
+}
+
 std::vector<const Node*> Storage::lexical_event_candidates(
     const std::vector<std::string>& words, int limit) const {
 #ifdef AME_WITH_POSTGRES
