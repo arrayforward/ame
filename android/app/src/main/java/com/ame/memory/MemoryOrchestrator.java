@@ -109,6 +109,8 @@ public class MemoryOrchestrator {
     }
 
     private final ArrayDeque<TurnDiag> diagLog = new ArrayDeque<>();
+    private final FollowupGate gate = new FollowupGate();  // 追问阶段状态机（渐进注入）
+    private final MemorySummaryService summaryService;      // 三级摘要检索（MEMSUM 事件）
 
     /** 短构造：普通对话模式（窗口/证据数取 BuildConfig 默认值，无导游参数） */
     public MemoryOrchestrator(AmeEngine engine, SessionStore store, String sessionId) {
@@ -128,6 +130,7 @@ public class MemoryOrchestrator {
         this.recallLimit = recallLimit;
         this.guideTitle = guideTitle;
         this.guideText = guideText;
+        this.summaryService = new MemorySummaryService(engine, sessionId);
     }
 
     public int getLastSentTokens() {
@@ -261,6 +264,30 @@ public class MemoryOrchestrator {
             List<EvidenceItem> items = recallEvidence(query,
                     deepRerank ? DEEP_RERANK_POOL : recallLimit, windowTexts);
             if (deepRerank) items = deepRerank(query, items);
+            // 渐进式摘要注入（MEMSUM 事件存在时替代原始证据文本）：
+            //   首问/新话题(SIMPLE) → 仅 L1（省 token）；追问(DEEP) → 联想词扩展+L2
+            FollowupGate.Stage stage = gate.onTurn(query);
+            List<MemorySummaryService.Summary> sums = summaryService.fetchFromAme(query, recallLimit);
+            if (!sums.isEmpty()) {
+                int level = 1;
+                if (stage == FollowupGate.Stage.DEEP) {
+                    java.util.LinkedHashSet<String> kws = new java.util.LinkedHashSet<>();
+                    for (MemorySummaryService.Summary s : sums) kws.addAll(s.keywords);
+                    List<MemorySummaryService.Summary> more =
+                            summaryService.fetchByKeywords(new java.util.ArrayList<>(kws), 3);
+                    java.util.LinkedHashMap<String, MemorySummaryService.Summary> merged =
+                            new java.util.LinkedHashMap<>();
+                    for (MemorySummaryService.Summary s : sums) merged.put(s.toJson(), s);
+                    for (MemorySummaryService.Summary s : more) merged.putIfAbsent(s.toJson(), s);
+                    sums = new java.util.ArrayList<>(merged.values());
+                    level = 2;
+                }
+                String ctx = summaryService.buildContext(sums, level);
+                items.clear();
+                items.add(new EvidenceItem(ctx, System.currentTimeMillis() / 1000, 1.0));
+                Log.d(TAG, "[" + sessionId + "] 摘要渐进注入 stage=" + stage
+                        + " 条数=" + sums.size() + " level=" + level + " 上下文=" + ctx.length() + "字");
+            }
             pr = buildSystemPrompt(items);
         } catch (org.json.JSONException e) {
             // Kotlin 中 JSON 异常非受检、直接外抛；Java 这里包装为 RuntimeException 等价传播

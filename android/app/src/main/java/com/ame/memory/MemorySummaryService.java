@@ -89,7 +89,9 @@ public final class MemorySummaryService {
         String system = "你是记忆整理器。把给定材料整理成严格 JSON（不要输出任何其他文字）："
                 + "{\"l1\":\"不超过60字的基础摘要，言简意赅\","
                 + "\"l2\":\"不超过300字的详细整理，面向难以理解的问题给出要点、因果和时序\","
-                + "\"keywords\":[\"3-6个联想词，用于扩展检索相关知识，名词优先\"]}";
+                + "\"keywords\":[\"3-6个联想词，用于扩展检索相关知识，名词优先\"]}。"
+                + "要求：l1 必须提炼关键事实（人物/时间/地点/数字/结论），不得只复述首句；"
+                + "keywords 必填且不得为空数组。";
         String user = (question == null || question.isEmpty() ? "" : "当前问题：" + question + "\n")
                 + "材料：\n" + source;
         Summary s = new Summary();
