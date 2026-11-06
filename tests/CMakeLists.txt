@@ -13,6 +13,7 @@ set(AME_TESTS
   test_diffusion     # M6  能量/路径/休眠隔离/budget
   test_rerank        # M7  融合打分/filters
   test_engine        # M12 网关动词/错误码
+  test_forget        # 4.0 条目级遗忘（block/unblock/delete）
   test_e2e           # 端到端全链路
 )
 

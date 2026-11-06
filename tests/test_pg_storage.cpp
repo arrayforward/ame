@@ -137,7 +137,8 @@ int main() {
       CHECK(st->from_json(Json::object()) == Err::Ok);
     CHECK(t1.remember_turn("user", "tenant one knowledge zephyrus", 100).code == Err::Ok);
     CHECK(t2.remember_turn("user", "tenant two secret wombat", 100).code == Err::Ok);
-    CHECK(s1.remember_turn("user", "session private quokka", 100).code == Err::Ok);
+    auto rp = s1.remember_turn("user", "session private quokka", 100);
+    CHECK(rp.code == Err::Ok);
     SeedQuery q1; q1.text = "zephyrus";
     SeedQuery q2; q2.text = "wombat";
     SeedQuery q3; q3.text = "quokka";
@@ -154,6 +155,17 @@ int main() {
     CHECK(has(s1, q3, "quokka"));     // 本 session 私有记忆不受影响
     s1.detach_tenant();
     CHECK(!has(s1, q1, "zephyrus"));  // detach 恢复完全私有
+
+    // 条目级遗忘（PG）：屏蔽可逆（数据保留）→ 删除（节点+关联边清除）
+    CHECK(s1.block_event(rp.event_id) == Err::Ok);
+    CHECK(!has(s1, q3, "quokka"));    // 屏蔽后 recall 不再返回
+    CHECK(s1.storage().get_node(rp.event_id) != nullptr);  // 屏蔽≠删除
+    CHECK(s1.unblock_event(rp.event_id) == Err::Ok);
+    CHECK(has(s1, q3, "quokka"));     // 解除后恢复
+    CHECK(s1.delete_event(rp.event_id) == Err::Ok);
+    CHECK(!has(s1, q3, "quokka"));
+    CHECK(s1.storage().get_node(rp.event_id) == nullptr);
+    CHECK(s1.delete_event(rp.event_id) == Err::NotFound);
   }
 
   if (failures == 0) std::printf("PASS test_pg_storage（全部对照断言通过）\n");

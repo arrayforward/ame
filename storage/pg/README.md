@@ -88,6 +88,11 @@ bench：`--pg-conn "host=... dbname=ame user=postgres password=ame" [--pg-ns 前
 - **验证**：`test_pg_storage` 租户用例断言——未 attach 不可见共享、attach 命中共享、
   其它租户共享永不可见、私有不受影响、detach 恢复隔离。
 
+- **遗忘三级**：条目屏蔽 `block_event/unblock_event`（可逆，数据保留，recall 不再返回）、
+  条目删除 `delete_event`（节点+全部关联边，不可恢复）、session 清空
+  `from_json(Json::object())`（clear_ns）。双后端同语义（`test_forget` 内存端 +
+  `test_pg_storage` PG 端各一组断言）。
+
 ## 文件
 
 - `pg_backend.h/.cpp`：后端实现（Storage 公开方法 `if (pg_)` 分流，调用方零改动）。

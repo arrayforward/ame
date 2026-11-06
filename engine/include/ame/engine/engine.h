@@ -71,6 +71,13 @@ class Engine {
   void attach_tenant(Engine* tenant) { tenant_ = tenant; }
   void detach_tenant() { tenant_ = nullptr; }
 
+  // ⑧ 条目级遗忘（4.0）：block=屏蔽（可逆，数据保留，recall 不再返回）；
+  // unblock 解除；delete_event=删除（节点+全部关联边，不可恢复）。
+  // session 级清空：PG 用 from_json(空)（clear_ns），内存/手机端删 graph.json。
+  Err block_event(const std::string& uid);
+  Err unblock_event(const std::string& uid);
+  Err delete_event(const std::string& uid);
+
   // ① 注册实体
   std::string register_entity(const std::string& type, const std::string& name,
                               const Attrs& identifiers = {},

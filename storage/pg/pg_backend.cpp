@@ -301,6 +301,28 @@ Err PgBackend::upsert_edge(const Edge& e, bool add_weight) {
   return Err::Ok;
 }
 
+Err PgBackend::delete_node(const std::string& uid) {
+  std::lock_guard<std::recursive_mutex> lk(mu_);
+  CallScope cs(this);
+  if (!index_.count(uid)) return Err::NotFound;
+  PGresult* r = exec("DELETE FROM ame_edges WHERE ns=$1 AND (from_uid=$2 OR to_uid=$2)", {ns_, uid});
+  if (!r) return Err::IoError;
+  PQclear(r);
+  r = exec("DELETE FROM ame_nodes WHERE ns=$1 AND uid=$2", {ns_, uid});
+  if (!r) return Err::IoError;
+  PQclear(r);
+  // 缓存/索引同步移除（名字反查摘除旧项）
+  auto it = index_.find(uid);
+  std::string key = i64((int)it->second.kind) + "|" + it->second.name;
+  if (auto ni = name_index_.find(key); ni != name_index_.end()) {
+    auto& v = ni->second;
+    v.erase(std::remove(v.begin(), v.end(), uid), v.end());
+  }
+  index_.erase(it);
+  cache_.erase(uid);
+  return Err::Ok;
+}
+
 const Edge* PgBackend::find_edge(const std::string& from, const std::string& to, RelType t) const {
   std::lock_guard<std::recursive_mutex> lk(mu_);
   CallScope cs(this);

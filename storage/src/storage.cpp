@@ -178,6 +178,43 @@ Err Storage::upsert_edge(const Edge& e, bool add_weight) {
   return Err::Ok;
 }
 
+// 条目级删除：节点 + 关联边 + 名字索引（4.0；PG 分流见上）
+Err Storage::delete_node(const std::string& uid) {
+#ifdef AME_WITH_POSTGRES
+  if (pg_) return pg_->delete_node(uid);
+#endif
+  std::unique_lock lk(mu_);
+  auto it = nodes_.find(uid);
+  if (it == nodes_.end()) return Err::NotFound;
+  std::string key = std::to_string((int)it->second.kind) + "|" + it->second.name;
+  if (auto ni = name_index_.find(key); ni != name_index_.end()) {
+    auto& v = ni->second;
+    v.erase(std::remove(v.begin(), v.end(), uid), v.end());
+  }
+  nodes_.erase(it);
+  if (auto oi = out_.find(uid); oi != out_.end()) {
+    for (auto& e : oi->second)
+      if (auto ii = in_.find(e.to); ii != in_.end()) {
+        auto& v = ii->second;
+        v.erase(std::remove_if(v.begin(), v.end(),
+                               [&](const Edge& x) { return x.from == uid && x.type == e.type; }),
+                v.end());
+      }
+    out_.erase(oi);
+  }
+  if (auto ii = in_.find(uid); ii != in_.end()) {
+    for (auto& e : ii->second)
+      if (auto oi = out_.find(e.from); oi != out_.end()) {
+        auto& v = oi->second;
+        v.erase(std::remove_if(v.begin(), v.end(),
+                               [&](const Edge& x) { return x.to == uid && x.type == e.type; }),
+                v.end());
+      }
+    in_.erase(ii);
+  }
+  return Err::Ok;
+}
+
 // 伪代码：按 (from,to,type) 精确查边
 //   步骤1：取共享锁，查 from 的出边表，不存在返回 nullptr；
 //   步骤2：线性扫描出边，命中三元组相同者返回其地址，否则 nullptr。

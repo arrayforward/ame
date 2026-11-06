@@ -277,6 +277,12 @@ RecallResult Engine::recall(const SeedQuery& sq, const RecallFilters& filters, i
     rr.events = rerank_.rerank(dr, qemb, filters, limit);
     if (!explain)
       for (auto& e : rr.events) e.explain.clear();
+    // 条目屏蔽过滤（4.0）：blocked 节点不再注入回答（数据保留，可 unblock）
+    rr.events.erase(std::remove_if(rr.events.begin(), rr.events.end(),
+                                   [](const ScoredEvent& e) {
+                                     return e.event && e.event->attrs.count("blocked");
+                                   }),
+                    rr.events.end());
   }
   // ④ 租户知识库合并（4.0）：session 私有证据 + 租户共享证据按分融合去重
   if (tenant_) {
@@ -299,6 +305,23 @@ RecallResult Engine::recall(const SeedQuery& sq, const RecallFilters& filters, i
   }
   return rr;
 }
+
+// ⑧ 条目级遗忘（4.0）：屏蔽=attrs["blocked"] 标记（可逆），删除=节点+关联边移除
+Err Engine::block_event(const std::string& uid) {
+  Node* n = storage_.get_node_mut(uid);
+  if (!n) return Err::NotFound;
+  n->attrs["blocked"] = "1";
+  return storage_.put_node(*n);  // PG 写穿
+}
+
+Err Engine::unblock_event(const std::string& uid) {
+  Node* n = storage_.get_node_mut(uid);
+  if (!n) return Err::NotFound;
+  n->attrs.erase("blocked");
+  return storage_.put_node(*n);
+}
+
+Err Engine::delete_event(const std::string& uid) { return storage_.delete_node(uid); }
 
 // 直通 M2 实体解析器：把 uid_a 合并进 into_b
 Err Engine::merge_entities(const std::string& uid_a, const std::string& into_b) {

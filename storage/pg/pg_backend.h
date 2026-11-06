@@ -41,6 +41,8 @@ class PgBackend {
 
   Err put_node(const Node& n);
   Err upsert_edge(const Edge& e, bool add_weight);
+  // 条目级删除：本 ns 内删节点行 + 全部关联边行 + 缓存/索引条目
+  Err delete_node(const std::string& uid);
   const Edge* find_edge(const std::string& from, const std::string& to, RelType t) const;
   const Node* get_node(const std::string& uid) const;
   Node* get_node_mut(const std::string& uid);

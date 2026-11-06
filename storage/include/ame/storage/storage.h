@@ -48,6 +48,10 @@ class Storage {
   // 更新已存在边的 weight 与 attrs（不存在则新建）
   Err upsert_edge(const Edge& e, bool add_weight);
 
+  // 条目级删除（4.0）：删除节点及其全部关联边（出/入双向）、名字索引与缓存；
+  // 不存在返回 NotFound。PG 模式同步 DELETE 库内行（本 ns 内）。
+  Err delete_node(const std::string& uid);
+
   const Node* get_node(const std::string& uid) const;
   Node* get_node_mut(const std::string& uid);
 
