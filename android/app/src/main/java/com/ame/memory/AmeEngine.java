@@ -48,6 +48,14 @@ public final class AmeEngine implements AutoCloseable {
 
     private static native int nativeLoadCheapModel(long handle, String modelJson);
 
+    private static native int nativeBlockEvent(long handle, String uid);
+
+    private static native int nativeUnblockEvent(long handle, String uid);
+
+    private static native int nativeDeleteEvent(long handle, String uid);
+
+    private static native int nativeClearSession(long handle, String dir);
+
     public boolean isValid() {
         return handle != 0L;
     }
@@ -89,5 +97,25 @@ public final class AmeEngine implements AutoCloseable {
     @Override
     public void close() {
         nativeDestroySession(handle, dir);
+    }
+
+    /** 条目屏蔽（可逆）：recall 不再返回该条，数据保留；0=成功，1=NotFound */
+    public int blockEvent(String uid) {
+        return nativeBlockEvent(handle, uid);
+    }
+
+    /** 解除条目屏蔽，recall 恢复返回 */
+    public int unblockEvent(String uid) {
+        return nativeUnblockEvent(handle, uid);
+    }
+
+    /** 条目删除（不可恢复）：节点+全部关联边移除 */
+    public int deleteEvent(String uid) {
+        return nativeDeleteEvent(handle, uid);
+    }
+
+    /** session 记忆清空：清图+档案并删除 graph.json 快照（下轮对话为零记忆状态） */
+    public int clearSession() {
+        return nativeClearSession(handle, dir);
     }
 }

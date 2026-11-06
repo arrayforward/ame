@@ -34,12 +34,15 @@
 | `nativeCreateSession(dir) → jlong` | 建 Engine 并加载 dir/graph.json 快照（若有），返回句柄 |
 | `nativeDestroySession(handle, dir)` | 快照兜底落盘后销毁实例 |
 | `nativeRememberTurn(handle, speaker, text, ts, diaId, sessionId) → int` | 写一轮对话（user/assistant 双侧） |
-| `nativeRecall(handle, query, limit) → String` | 记忆检索，返回 JSON `[{text,ts,score}]`；注入 cheap 模型后自动 池60→特征重排→topN |
+| `nativeRecall(handle, query, limit) → String` | 记忆检索，返回 JSON `[{uid,text,ts,score}]`；注入 cheap 模型后自动 池60→特征重排→topN |
 | `nativeLoadCheapModel(handle, modelJson) → int` | 注入 cheap 重排模型（assets/cheap_model.json，默认启用）；1=成功，0=解析失败回退原序 |
 | `nativeLoadKeywordDict(handle, dict, cache) → int` | 加载中文关键词词典（AC 自动机 + 二进制缓存，多 session 共享） |
 | `nativeGetProfile(handle) → String` | 用户代理实体档案槽位 JSON `{name,slots:[...]}` |
 | `nativeStats(handle) → String` | 引擎统计 `{turns,total_chars,events,nodes}` |
 | `nativeSave/nativeLoad(handle, dir) → int` | 显式快照落盘/恢复 |
+| `nativeBlockEvent/nativeUnblockEvent(handle, uid) → int` | 条目屏蔽/解除（可逆，recall 不再返回但数据保留） |
+| `nativeDeleteEvent(handle, uid) → int` | 条目删除（节点+全部关联边，不可恢复；重复删除 NotFound） |
+| `nativeClearSession(handle, dir) → int` | session 记忆清空：清图+档案槽位并删除 graph.json 快照 |
 
 持久化布局：`filesDir/sessions.json`（会话元数据）、
 `filesDir/sessions/<id>/messages.jsonl`（消息流）、`graph.json`（AME 图快照）。

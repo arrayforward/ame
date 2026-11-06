@@ -323,6 +323,13 @@ Err Engine::unblock_event(const std::string& uid) {
 
 Err Engine::delete_event(const std::string& uid) { return storage_.delete_node(uid); }
 
+// session 级清空：图（PG=clear_ns，内存=清 nodes/邻接表/名字索引）+ 档案槽位
+void Engine::clear_memory() {
+  Json empty = Json::object();
+  storage_.from_json(empty);
+  entity_.slots_from_json(empty);
+}
+
 // 直通 M2 实体解析器：把 uid_a 合并进 into_b
 Err Engine::merge_entities(const std::string& uid_a, const std::string& into_b) {
   return entity_.merge_entities(uid_a, into_b);

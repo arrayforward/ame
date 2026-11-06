@@ -78,6 +78,10 @@ class Engine {
   Err unblock_event(const std::string& uid);
   Err delete_event(const std::string& uid);
 
+  // session 级清空（4.0）：清图 + 实体档案槽位（PG=clear_ns，内存=清空邻接表/索引）。
+  // 别名表视为配置保留；调用方负责另行删除持久化文件（Android 由 JNI 删 graph.json）。
+  void clear_memory();
+
   // ① 注册实体
   std::string register_entity(const std::string& type, const std::string& name,
                               const Attrs& identifiers = {},

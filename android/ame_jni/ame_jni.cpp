@@ -347,7 +347,8 @@ JNIEXPORT jstring JNICALL Java_com_ame_memory_AmeEngine_nativeRecall(JNIEnv* env
     if (!se.event) continue;
     if (!first) out += ",";
     first = false;
-    out += "{\"text\":\"" + ame_jni::jesc(se.event->text) + "\",\"ts\":" +
+    out += "{\"uid\":\"" + ame_jni::jesc(se.event->uid) + "\",\"text\":\"" +
+           ame_jni::jesc(se.event->text) + "\",\"ts\":" +
            std::to_string((long long)se.event->ts) +
            ",\"score\":" + std::to_string(se.score);
     auto sp = se.event->attrs.find("speaker");
@@ -418,6 +419,40 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeLoad(JNIEnv* env, jcl
   auto* e = get(h);
   if (!e) return -1;
   return (jint)e->load(snapshot_path(ame_jni::j2s(env, dir)));
+}
+
+// ---- 4.0 条目级遗忘 + session 清空（供 App/API 层直接验证两能力）----
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeBlockEvent(JNIEnv* env, jclass,
+                                                                      jlong h, jstring uid) {
+  auto* e = get(h);
+  if (!e) return -1;
+  return (jint)e->block_event(ame_jni::j2s(env, uid));
+}
+
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeUnblockEvent(JNIEnv* env, jclass,
+                                                                        jlong h, jstring uid) {
+  auto* e = get(h);
+  if (!e) return -1;
+  return (jint)e->unblock_event(ame_jni::j2s(env, uid));
+}
+
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeDeleteEvent(JNIEnv* env, jclass,
+                                                                       jlong h, jstring uid) {
+  auto* e = get(h);
+  if (!e) return -1;
+  return (jint)e->delete_event(ame_jni::j2s(env, uid));
+}
+
+// nativeClearSession：清图+档案（clear_memory）并删除快照文件，session 记忆完全卸载
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeClearSession(JNIEnv* env, jclass,
+                                                                        jlong h, jstring dir) {
+  auto* e = get(h);
+  if (!e) return -1;
+  e->clear_memory();
+  std::string sp = snapshot_path(ame_jni::j2s(env, dir));
+  std::remove(sp.c_str());
+  LOGI("clearSession: 记忆已清空并删除快照 %s", sp.c_str());
+  return 0;
 }
 
 }  // extern "C"

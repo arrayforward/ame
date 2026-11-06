@@ -155,7 +155,25 @@ prompt 注入前 8000 字，截断外细节靠 recall 命中已灌入的方案�
   token/证据数/联网/重排状态）、证据逐条、System Prompt 全文、Messages 逐条
   角色卡片。召回问题先看这里，比 logcat 直观。
 
-## 11. 调参速查
+## 11. 遗忘 API（条目屏蔽/删除 + session 清空）
+
+`AmeEngine`（Java 薄壳 → JNI → `Engine` 动词），返回 0=成功、1=NotFound、-1=引擎无效：
+
+```java
+engine.blockEvent(uid);     // 条目屏蔽：recall 不再返回，数据保留（可逆）
+engine.unblockEvent(uid);   // 解除屏蔽，恢复召回
+engine.deleteEvent(uid);    // 条目删除：节点+全部关联边，不可恢复
+engine.clearSession();      // session 记忆清空：清图+档案并删 graph.json
+```
+
+- uid 即事件 id（`RememberResult.event_id`；recall JSON 每条带 `uid` 字段，
+  可直接从召回证据里取条目做屏蔽/删除）。
+- 屏蔽只影响召回注入，不删除数据，适合"这条别再用"的隐私/纠错场景；
+  删除是物理清除（含 PG 端 `DELETE FROM ... WHERE ns=当前session`）。
+- `clearSession` 后 `close()` 的兜底快照会写入一份空图，属预期；
+  验证器：`demo/ame_e2e_forget`（16 步场景全过，无 LLM，PC 直接运行）。
+
+## 12. 调参速查
 
 | 旋钮 | 位置 | 默认 | 说明 |
 |---|---|---|---|

@@ -358,7 +358,9 @@ pgvector HNSW 余弦、邻居索引、词法候选 OR ILIKE），支持较大数
   （pgvector db + Linux 构建容器，ON 编译 + `test_pg_storage` 对照断言）。
 - bench：`--pg-conn ... [--pg-ns 前缀]`，每 case 独立 ns 并先清库，对照内存管线。
 - **遗忘三级**：条目屏蔽 `block_event/unblock_event`（可逆）、条目删除 `delete_event`
-  （节点+关联边）、session 清空（clear_ns），双后端同语义并有测试覆盖。
+  （节点+关联边）、session 清空（`clear_memory` / clear_ns），双后端同语义并有测试覆盖；
+  Android 已暴露 `AmeEngine.blockEvent/unblockEvent/deleteEvent/clearSession`，
+  场景验证器 `demo/ame_e2e_forget`（16 步全过）。
 - **租户知识库**：`session.attach_tenant(&tenant)` 后 recall 自动合并租户共享证据
   （按分融合去重），共同记忆写租户 ns；不同租户共享/私有全部按 ns 隔离，
   detach 恢复完全私有（`test_pg_storage` 租户用例覆盖）。
