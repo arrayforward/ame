@@ -43,6 +43,8 @@
 | `nativeBlockEvent/nativeUnblockEvent(handle, uid) → int` | 条目屏蔽/解除（可逆，recall 不再返回但数据保留） |
 | `nativeDeleteEvent(handle, uid) → int` | 条目删除（节点+全部关联边，不可恢复；重复删除 NotFound） |
 | `nativeClearSession(handle, dir) → int` | session 记忆清空：清图+档案槽位并删除 graph.json 快照 |
+| `nativeAttachTenant(handle, tenantHandle) → int` | 挂接租户知识库（另一 Engine 实例），recall 合并共享记忆 |
+| `nativeDetachTenant(handle) → int` | 解除租户挂接，恢复完全私有 |
 
 持久化布局：`filesDir/sessions.json`（会话元数据）、
 `filesDir/sessions/<id>/messages.jsonl`（消息流）、`graph.json`（AME 图快照）。

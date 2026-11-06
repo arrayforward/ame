@@ -173,6 +173,18 @@ engine.clearSession();      // session 记忆清空：清图+档案并删 graph.
 - `clearSession` 后 `close()` 的兜底快照会写入一份空图，属预期；
   验证器：`demo/ame_e2e_forget`（16 步场景全过，无 LLM，PC 直接运行）。
 
+**session / 租户管理 API 速查**：
+
+| 能力 | 入口 |
+|---|---|
+| 创建 session | `SessionStore.createSession(name, type, pdf)`（MainActivity 新建按钮） |
+| 删除 session | `SessionStore.deleteSession(id)`（递归删目录）或 `AmeEngine.clearSession()`（清引擎+快照） |
+| 创建租户知识库 | `AmeEngine tenant = AmeEngine.create(tenantDir)`（独立目录=独立记忆库） |
+| 挂接/解除租户 | `session.attachTenant(tenant)` / `session.detachTenant()` |
+
+租户共享语义：挂接后 session 的 recall 自动合并租户证据（按分融合去重）；
+不同租户、不同 session 的记忆在各自目录/ns 下完全隔离。
+
 ## 12. 调参速查
 
 | 旋钮 | 位置 | 默认 | 说明 |

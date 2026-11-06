@@ -455,4 +455,22 @@ JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeClearSession(JNIEnv* 
   return 0;
 }
 
+// 租户知识库：tenant 也是 AmeEngine.create 出的独立引擎（独立目录=独立记忆库），
+// attach 后本 session 的 recall 自动合并租户证据（合并/去重见 Engine::recall）
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeAttachTenant(JNIEnv*, jclass,
+                                                                        jlong h, jlong tenant) {
+  auto* e = get(h);
+  auto* t = get(tenant);
+  if (!e || !t) return -1;
+  e->attach_tenant(t);
+  return 0;
+}
+
+JNIEXPORT jint JNICALL Java_com_ame_memory_AmeEngine_nativeDetachTenant(JNIEnv*, jclass, jlong h) {
+  auto* e = get(h);
+  if (!e) return -1;
+  e->detach_tenant();
+  return 0;
+}
+
 }  // extern "C"
